@@ -42,7 +42,7 @@ EOF
             else
                 # Directory — run ctags on listed files
                 rqs_list_files "$rel" | while IFS= read -r f; do
-                    (cd "$RQS_TARGET_REPO" && ctags --output-format=json --fields=+nKSse -f - "$f" 2>/dev/null)
+                    (cd "$RQS_TARGET_REPO" && ctags $(rqs_ctags_args) -f - "$f" 2>/dev/null)
                 done | rqs_render symbols --scope "$rel" --kinds "$filter_kinds"
             fi
         else
@@ -52,7 +52,7 @@ EOF
                 rqs_render symbols --kinds "$filter_kinds" --from-cache < "$tags_file"
             else
                 rqs_list_files | while IFS= read -r f; do
-                    (cd "$RQS_TARGET_REPO" && ctags --output-format=json --fields=+nKSse -f - "$f" 2>/dev/null)
+                    (cd "$RQS_TARGET_REPO" && ctags $(rqs_ctags_args) -f - "$f" 2>/dev/null)
                 done | rqs_render symbols --kinds "$filter_kinds"
             fi
         fi

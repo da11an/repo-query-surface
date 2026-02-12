@@ -113,8 +113,43 @@ rqs_relative_path() {
 
 # ── ctags Integration ──────────────────────────────────────────────────────
 
+RQS_CTAGS_OUTPUT_FORMAT=""
+
+rqs_detect_ctags() {
+    # Cache detection result
+    if [[ -n "$RQS_CTAGS_OUTPUT_FORMAT" ]]; then
+        return 0
+    fi
+
+    if ! command -v ctags &>/dev/null; then
+        RQS_CTAGS_OUTPUT_FORMAT=""
+        return 1
+    fi
+
+    local ver
+    ver=$(ctags --version 2>/dev/null || echo "")
+    if echo "$ver" | grep -qi "universal"; then
+        # Universal Ctags supports JSON output
+        RQS_CTAGS_OUTPUT_FORMAT="json"
+    else
+        # Exuberant (or unknown) – fall back to classic tags format
+        RQS_CTAGS_OUTPUT_FORMAT="classic"
+    fi
+}
+
 rqs_has_ctags() {
-    command -v ctags &>/dev/null && ctags --version 2>/dev/null | grep -qi "universal"
+    rqs_detect_ctags
+}
+
+# Return appropriate ctags flags for the detected implementation
+rqs_ctags_args() {
+    rqs_detect_ctags || return 1
+    if [[ "$RQS_CTAGS_OUTPUT_FORMAT" == "json" ]]; then
+        echo "--output-format=json --fields=+nKSse"
+    else
+        # Classic tags format: we only need line numbers
+        echo "--fields=+n"
+    fi
 }
 
 rqs_cache_dir() {
@@ -145,7 +180,7 @@ rqs_cache_ctags() {
 
     # Generate tags
     (cd "$RQS_TARGET_REPO" && git ls-files | grep -vE "$RQS_IGNORE_REGEX" \
-        | ctags --output-format=json --fields=+nKSse -L - -f - 2>/dev/null) \
+        | ctags $(rqs_ctags_args) -L - -f - 2>/dev/null) \
         > "$tags_file"
 
     echo "$tags_file"
@@ -154,7 +189,7 @@ rqs_cache_ctags() {
 rqs_run_ctags_file() {
     local filepath="$1"
     if rqs_has_ctags; then
-        (cd "$RQS_TARGET_REPO" && ctags --output-format=json --fields=+nKSse -f - "$filepath" 2>/dev/null)
+        (cd "$RQS_TARGET_REPO" && ctags $(rqs_ctags_args) -f - "$filepath" 2>/dev/null)
     fi
 }
 

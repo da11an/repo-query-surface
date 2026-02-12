@@ -90,21 +90,89 @@ def render_tree(args):
 # ── Symbol Rendering ───────────────────────────────────────────────────────
 
 
-def parse_ctags_json(lines):
-    """Parse ctags JSON output lines into structured records."""
-    symbols = []
-    for line in lines:
-        line = line.strip()
-        if not line or line.startswith("!"):
-            continue
-        try:
-            tag = json.loads(line)
-            if tag.get("_type") == "tag":
-                symbols.append(tag)
-        except json.JSONDecodeError:
-            continue
-    return symbols
+# ── Symbol Rendering ───────────────────────────────────────────────────────
 
+CTAGS_KIND_MAP = {
+    "c": "class",
+    "f": "function",
+    "m": "member",
+    "v": "variable",
+    "p": "prototype",
+    "s": "struct",
+    "u": "union",
+    "e": "enum",
+    "g": "enum_member",
+    "t": "typedef",
+    # fall back to raw code if unknown
+}
+
+def _parse_exuberant_tag_line(line: str):
+    """Parse a single classic-format Exuberant/Universal ctags line into our tag dict."""
+    if line.startswith("!"):
+        return None
+
+    parts = line.split("\t")
+    if len(parts) < 4:
+        return None
+
+    name = parts[0]
+    path = parts[1]
+    # parts[2] is the ex command; we don't need it here
+    rest = parts[3:]
+    if not rest:
+        return None
+
+    # First field after ex command is the kind code (single letter)
+    kind_code = rest[0]
+    extra = rest[1:]
+
+    kind = CTAGS_KIND_MAP.get(kind_code, kind_code)
+    line_no = None
+
+    for field in extra:
+        if field.startswith("line:"):
+            try:
+                line_no = int(field.split(":", 1)[1])
+            except ValueError:
+                pass
+
+    if line_no is None:
+        # Best-effort default; keeps sort stable without crashing
+        line_no = 0
+
+    return {
+        "_type": "tag",
+        "name": name,
+        "path": path,
+        "line": line_no,
+        "kind": kind,
+    }
+
+def parse_ctags_json(lines):
+    """Parse ctags output (Universal JSON or classic) into structured records."""
+    symbols = []
+    for raw in lines:
+        line = raw.strip()
+        if not line:
+            continue
+
+        tag = None
+
+        # Prefer JSON (Universal Ctags)
+        if line.startswith("{") or line.startswith("["):
+            try:
+                tag = json.loads(line)
+            except json.JSONDecodeError:
+                tag = None
+
+        # Fallback: classic tags line (Exuberant / non-JSON Universal)
+        if tag is None:
+            tag = _parse_exuberant_tag_line(line)
+
+        if tag and tag.get("_type") == "tag":
+            symbols.append(tag)
+
+    return symbols
 
 def render_symbols(args):
     scope = None
