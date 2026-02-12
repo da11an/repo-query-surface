@@ -1,0 +1,135 @@
+#!/usr/bin/env bash
+# rqs — repo-query-surface CLI entry point
+# Exposes structured, queryable repository context for LLMs
+
+set -euo pipefail
+
+# ── Self-location ───────────────────────────────────────────────────────────
+
+RQS_BIN_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+RQS_ROOT_DIR="$(dirname "$RQS_BIN_DIR")"
+RQS_LIB_DIR="$RQS_ROOT_DIR/lib"
+RQS_CONF_DIR="$RQS_ROOT_DIR/conf"
+export RQS_BIN_DIR RQS_ROOT_DIR RQS_LIB_DIR RQS_CONF_DIR
+
+# ── Target Repo Resolution ─────────────────────────────────────────────────
+
+resolve_target_repo() {
+    if [[ -n "${RQS_TARGET_REPO:-}" ]]; then
+        return
+    fi
+
+    local dir="$PWD"
+    while [[ "$dir" != "/" ]]; do
+        if [[ -d "$dir/.git" ]]; then
+            RQS_TARGET_REPO="$dir"
+            export RQS_TARGET_REPO
+            return
+        fi
+        dir="$(dirname "$dir")"
+    done
+
+    echo "error: not inside a git repository (use --repo <path>)" >&2
+    exit 1
+}
+
+# ── Parse Global Flags ─────────────────────────────────────────────────────
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --repo)
+            RQS_TARGET_REPO="$(readlink -f "$2")"
+            export RQS_TARGET_REPO
+            shift 2
+            ;;
+        --help|-h)
+            cat <<'EOF'
+Usage: rqs [--repo <path>] <command> [options]
+
+Commands:
+  tree [path] [--depth N]        Filtered directory tree
+  symbols [file|dir]             Symbol index via ctags
+  outline <file>                 Structural outline of a single file
+  slice <file> <start> <end>     Extract code slice with line numbers
+  definition <symbol>            Find where a symbol is defined
+  references <symbol>            Find call sites / usage
+  deps <file>                    Show imports (internal vs external)
+  grep <pattern> [--scope dir]   Structured regex search
+  primer                         Generate complete static primer
+
+Global options:
+  --repo <path>   Target repository (default: walk up from $PWD)
+  --help          Show this help
+
+EOF
+            exit 0
+            ;;
+        -*) echo "error: unknown global option '$1'" >&2; exit 1 ;;
+        *) break ;;
+    esac
+done
+
+if [[ $# -eq 0 ]]; then
+    echo "error: no command specified (try 'rqs --help')" >&2
+    exit 1
+fi
+
+# ── Resolve Target Repo ────────────────────────────────────────────────────
+
+resolve_target_repo
+
+# ── Load Shared Libraries ──────────────────────────────────────────────────
+
+# shellcheck source=../lib/rqs_common.sh
+source "$RQS_LIB_DIR/rqs_common.sh"
+
+# Load config (defaults -> .rqsrc -> CLI overrides happen in subcommands)
+rqs_load_config
+
+# ── Command Dispatch ───────────────────────────────────────────────────────
+
+COMMAND="$1"
+shift
+
+case "$COMMAND" in
+    tree)
+        source "$RQS_LIB_DIR/rqs_tree.sh"
+        cmd_tree "$@"
+        ;;
+    symbols)
+        source "$RQS_LIB_DIR/rqs_symbols.sh"
+        cmd_symbols "$@"
+        ;;
+    outline)
+        source "$RQS_LIB_DIR/rqs_outline.sh"
+        cmd_outline "$@"
+        ;;
+    slice)
+        source "$RQS_LIB_DIR/rqs_slice.sh"
+        cmd_slice "$@"
+        ;;
+    definition)
+        source "$RQS_LIB_DIR/rqs_definition.sh"
+        cmd_definition "$@"
+        ;;
+    references)
+        source "$RQS_LIB_DIR/rqs_references.sh"
+        cmd_references "$@"
+        ;;
+    deps)
+        source "$RQS_LIB_DIR/rqs_deps.sh"
+        cmd_deps "$@"
+        ;;
+    grep)
+        source "$RQS_LIB_DIR/rqs_grep.sh"
+        cmd_grep "$@"
+        ;;
+    primer)
+        source "$RQS_LIB_DIR/rqs_primer.sh"
+        cmd_primer "$@"
+        ;;
+    *)
+        echo "error: unknown command '$COMMAND' (try 'rqs --help')" >&2
+        exit 1
+        ;;
+esac

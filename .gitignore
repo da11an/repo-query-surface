@@ -1,0 +1,3 @@
+.rqs_cache/
+tests/fixtures/sample-repo/.git/
+tests/fixtures/sample-repo/.rqs_cache/
