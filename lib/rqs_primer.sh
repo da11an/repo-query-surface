@@ -116,8 +116,8 @@ primer_symbol_index() {
 
     if rqs_has_ctags; then
         local tags_data
-        tags_data=$(rqs_list_files | while IFS= read -r f; do
-            (cd "$RQS_TARGET_REPO" && ctags --output-format=json --fields=+nKSse -f - "$f" 2>/dev/null)
+	tags_data=$(rqs_list_files | while IFS= read -r f; do
+	    (cd "$RQS_TARGET_REPO" && ctags $(rqs_ctags_args) -f - "$f" 2>/dev/null)
         done | head -n "$max_symbols") || true
 
         if [[ -n "$tags_data" ]]; then
