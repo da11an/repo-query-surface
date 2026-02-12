@@ -557,11 +557,22 @@ def render_signatures(args):
     """Render Python file signatures from file list on stdin."""
     repo_root = os.environ.get("RQS_TARGET_REPO", ".")
 
+    scope = None
+    i = 0
+    while i < len(args):
+        if args[i] == "--scope":
+            scope = args[i + 1]
+            i += 2
+        else:
+            i += 1
+
     file_list = [line.strip() for line in sys.stdin if line.strip()]
     if not file_list:
         print("*(no Python files found)*")
         return
 
+    # Collect all file results first
+    results = []
     for filepath in file_list:
         abs_path = os.path.join(repo_root, filepath)
         if not os.path.isfile(abs_path):
@@ -584,13 +595,23 @@ def render_signatures(args):
         while sig_lines and not sig_lines[-1].strip():
             sig_lines.pop()
 
-        print(f"## Signatures: `{filepath}`")
-        print("> Behavioral sketch: class/function headers, decorators, first-line docstrings, and return statements. Implementation details omitted. Request `rqs slice <file> <start> <end>` to see full code.")
+        results.append((filepath, sig_lines))
+
+    if not results:
+        print("*(no Python files found)*")
+        return
+
+    # Print top-level header with description once
+    title = f"## Signatures: `{scope}`" if scope else "## Signatures"
+    print(title)
+    print("> Behavioral sketch: class/function headers, decorators, first-line docstrings, and return statements. Implementation details omitted. Request `rqs slice <file> <start> <end>` to see full code.")
+
+    for filepath, sig_lines in results:
+        print(f"\n### `{filepath}`")
         print("```python")
         for line in sig_lines:
             print(line)
         print("```")
-        print()
 
 
 # ── Dispatch ────────────────────────────────────────────────────────────────

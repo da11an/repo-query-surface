@@ -39,13 +39,13 @@ EOF
             if [[ "$rel" != *.py ]]; then
                 rqs_error "signatures: only Python files are supported (got $rel)"
             fi
-            echo "$rel" | rqs_render signatures
+            echo "$rel" | rqs_render signatures --scope "$rel"
         else
             py_files=$(rqs_list_files "$rel" | grep '\.py$' || true)
             if [[ -z "$py_files" ]]; then
-                echo "" | rqs_render signatures
+                echo "" | rqs_render signatures --scope "$rel"
             else
-                echo "$py_files" | rqs_render signatures
+                echo "$py_files" | rqs_render signatures --scope "$rel"
             fi
         fi
     else

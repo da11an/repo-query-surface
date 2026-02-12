@@ -290,8 +290,8 @@ test_signatures() {
 
     # Directory mode
     output=$("$RQS" --repo "$FIXTURE_DIR" signatures src/ 2>&1)
-    assert_contains "signatures dir has main.py" "$output" 'Signatures: `src/main.py`'
-    assert_contains "signatures dir has helpers.py" "$output" 'Signatures: `src/utils/helpers.py`'
+    assert_contains "signatures dir has main.py" "$output" '### `src/main.py`'
+    assert_contains "signatures dir has helpers.py" "$output" '### `src/utils/helpers.py`'
     assert_contains "signatures dir has format_output" "$output" "def format_output"
 
     # Help
