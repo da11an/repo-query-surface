@@ -5,8 +5,11 @@ Reads structured data from stdin, writes clean markdown to stdout.
 Single script, multiple render modes. Stdlib only.
 """
 
+import ast
 import json
+import os
 import sys
+import warnings
 from collections import defaultdict
 
 
@@ -75,6 +78,8 @@ def render_tree(args):
     tree, dirs = build_tree(file_list, depth)
     root_label = root.rstrip("/") if root != "." else "."
     print(f"## Tree: `{root_label}`")
+    depth_info = f"depth: {depth}" if depth else "full depth"
+    print(f"> Filtered directory structure from git-tracked files ({depth_info}, {len(file_list)} files). Request `rqs tree <path> --depth N` to explore subdirectories.")
     print(f"```")
     print(f"{root_label}/")
     for line in render_tree_lines(tree, dirs):
@@ -142,6 +147,9 @@ def render_symbols(args):
 
     title = f"## Symbols: `{scope}`" if scope else "## Symbols"
     print(title)
+    sym_count = len(symbols)
+    file_count = len(by_file)
+    print(f"> Symbol index extracted via ctags — classes, functions, types grouped by file ({sym_count} symbols across {file_count} files). Request `rqs outline <file>` for hierarchy detail or `rqs signatures <file>` for full signatures.")
 
     for path in sorted(by_file.keys()):
         syms = by_file[path]
@@ -176,6 +184,7 @@ def render_outline(args):
     symbols.sort(key=lambda s: s.get("line", 0))
 
     print(f"## Outline: `{filepath}`")
+    print("> Structural hierarchy of symbols with line spans. Request `rqs slice <file> <start> <end>` to see implementation.")
     print("```")
     for sym in symbols:
         name = sym.get("name", "?")
@@ -202,15 +211,33 @@ def render_outline(args):
 
 
 def render_slice(args):
-    filepath = args[0] if args else "?"
-    lang = args[1] if len(args) > 1 else ""
+    filepath = "?"
+    lang = ""
+    start_line = None
+    end_line = None
+    i = 0
+    positional = []
+    while i < len(args):
+        if args[i] == "--lines":
+            start_line = args[i + 1]
+            end_line = args[i + 2]
+            i += 3
+        else:
+            positional.append(args[i])
+            i += 1
+    filepath = positional[0] if len(positional) > 0 else "?"
+    lang = positional[1] if len(positional) > 1 else ""
 
     content = sys.stdin.read()
     if not content.strip():
         print("*(empty slice)*")
         return
 
-    print(f"## Slice: `{filepath}`")
+    if start_line and end_line:
+        print(f"## Slice: `{filepath}` (lines {start_line}-{end_line})")
+    else:
+        print(f"## Slice: `{filepath}`")
+    print("> Code extract with line numbers. Request adjacent ranges to see surrounding context.")
     print(f"```{lang}")
     print(content, end="")
     print("```")
@@ -230,6 +257,7 @@ def render_definition(args):
         return
 
     print(f"## Definition: `{symbol}`")
+    print("> Source locations where this symbol is defined. Request `rqs slice <file> <start> <end>` to see the implementation, or `rqs references <symbol>` for usage.")
     print("| File | Kind | Line |")
     print("|------|------|------|")
     for s in symbols:
@@ -251,6 +279,7 @@ def render_references(args):
         return
 
     print(f"## References: `{symbol}`")
+    print("> Call sites and usage (definition lines excluded). Format: file:line:content.")
     print(f"```")
     print(content, end="")
     print("```")
@@ -280,6 +309,7 @@ def render_deps(args):
             external.append(line[len("EXTERNAL:"):].strip())
 
     print(f"## Dependencies: `{filepath}`")
+    print("> Import analysis. Internal = exists in this repo. External = third-party or stdlib.")
 
     if internal:
         print("\n**Internal:**")
@@ -326,7 +356,10 @@ def render_grep(args):
                 current_file = fpath
                 results[fpath].append((lineno, text))
 
+    match_count = sum(len(v) for v in results.values())
+    file_count = len(results)
     print(f"## Grep: `{pattern}`")
+    print(f"> Regex search results across git-tracked files, grouped by file with line numbers ({match_count} matches in {file_count} files).")
 
     if not results:
         print(f"```")
@@ -392,6 +425,174 @@ def render_primer(args):
     print(content, end="")
 
 
+# ── Signatures Rendering ───────────────────────────────────────────────────
+
+
+def _get_docstring_first_line(node):
+    """Extract the first line of a docstring from an AST node, or None."""
+    if (node.body
+            and isinstance(node.body[0], ast.Expr)
+            and isinstance(node.body[0].value, ast.Constant)):
+        val = node.body[0].value
+        doc = val.value
+        if isinstance(doc, str):
+            first = doc.strip().split("\n")[0].strip()
+            return first
+    return None
+
+
+def _reconstruct_decorator(node, source_lines):
+    """Reconstruct a decorator from source lines."""
+    return source_lines[node.lineno - 1].rstrip()
+
+
+def _reconstruct_def_line(node, source_lines):
+    """Reconstruct the def/class line from source, handling multi-line."""
+    lines = []
+    for i in range(node.lineno - 1, min(node.end_lineno or node.lineno, len(source_lines))):
+        lines.append(source_lines[i].rstrip())
+        if ":" in source_lines[i]:
+            break
+    return "\n".join(lines)
+
+
+def _extract_return_lines(node, source_lines):
+    """Extract return statement lines from a function body (top-level only, not nested)."""
+    returns = []
+    for child in ast.walk(node):
+        if isinstance(child, ast.Return) and child is not node:
+            # Skip returns inside nested functions/classes
+            if _is_direct_child_return(node, child):
+                line = source_lines[child.lineno - 1].rstrip()
+                returns.append(line)
+    return returns
+
+
+def _is_direct_child_return(func_node, return_node):
+    """Check if a return node belongs directly to func_node (not a nested def)."""
+    # Walk the function body to find returns, but stop at nested function boundaries
+    for child in ast.iter_child_nodes(func_node):
+        if child is return_node:
+            return True
+        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            continue  # Don't recurse into nested defs
+        if _is_direct_child_return(child, return_node):
+            return True
+    return False
+
+
+def _extract_signatures_from_file(filepath, source_lines, indent=""):
+    """Extract signatures from a parsed AST file."""
+    try:
+        source = "\n".join(source_lines)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", SyntaxWarning)
+            tree = ast.parse(source, filename=filepath)
+    except SyntaxError:
+        return [f"{indent}# (syntax error, could not parse)"]
+
+    return _extract_signatures_from_body(tree.body, source_lines, indent, is_module=True)
+
+
+def _extract_signatures_from_body(body, source_lines, indent="", is_module=False):
+    """Extract signatures from a list of AST body nodes."""
+    lines = []
+
+    # Module-level docstring
+    if is_module and body:
+        first = body[0]
+        if (isinstance(first, ast.Expr)
+                and isinstance(first.value, ast.Constant)):
+            val = first.value
+            doc = val.value
+            if isinstance(doc, str):
+                first_line = doc.strip().split("\n")[0].strip()
+                lines.append(f"{indent}# {first_line}")
+                lines.append("")
+
+    for node in body:
+        if isinstance(node, ast.ClassDef):
+            # Decorators
+            for dec in node.decorator_list:
+                lines.append(_reconstruct_decorator(dec, source_lines))
+            # Class definition line
+            lines.append(_reconstruct_def_line(node, source_lines))
+            # Class docstring
+            doc = _get_docstring_first_line(node)
+            if doc:
+                lines.append(f"{indent}    # {doc}")
+                lines.append("")
+            # Class body — recurse for methods
+            method_lines = _extract_signatures_from_body(
+                node.body, source_lines, indent + "    "
+            )
+            if method_lines:
+                lines.extend(method_lines)
+            lines.append("")
+
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            # Decorators
+            for dec in node.decorator_list:
+                lines.append(_reconstruct_decorator(dec, source_lines))
+            # Function definition line
+            lines.append(_reconstruct_def_line(node, source_lines))
+            # Docstring
+            doc = _get_docstring_first_line(node)
+            if doc:
+                lines.append(f"{indent}    # {doc}")
+            # Return statements
+            returns = _extract_return_lines(node, source_lines)
+            if returns:
+                for ret in returns:
+                    lines.append(ret)
+            elif not doc:
+                # No docstring and no returns — show placeholder
+                lines.append(f"{indent}    ...")
+            lines.append("")
+
+    return lines
+
+
+def render_signatures(args):
+    """Render Python file signatures from file list on stdin."""
+    repo_root = os.environ.get("RQS_TARGET_REPO", ".")
+
+    file_list = [line.strip() for line in sys.stdin if line.strip()]
+    if not file_list:
+        print("*(no Python files found)*")
+        return
+
+    for filepath in file_list:
+        abs_path = os.path.join(repo_root, filepath)
+        if not os.path.isfile(abs_path):
+            continue
+
+        try:
+            with open(abs_path) as f:
+                source_lines = f.read().splitlines()
+        except (OSError, UnicodeDecodeError):
+            continue
+
+        sig_lines = _extract_signatures_from_file(filepath, source_lines)
+
+        # Skip files with no meaningful signatures
+        non_empty = [l for l in sig_lines if l.strip() and l.strip() != "..."]
+        if not non_empty:
+            continue
+
+        # Trim trailing blank lines
+        while sig_lines and not sig_lines[-1].strip():
+            sig_lines.pop()
+
+        print(f"## Signatures: `{filepath}`")
+        print("> Behavioral sketch: class/function headers, decorators, first-line docstrings, and return statements. Implementation details omitted. Request `rqs slice <file> <start> <end>` to see full code.")
+        print("```python")
+        for line in sig_lines:
+            print(line)
+        print("```")
+        print()
+
+
 # ── Dispatch ────────────────────────────────────────────────────────────────
 
 
@@ -406,6 +607,7 @@ MODES = {
     "grep": render_grep,
     "summaries": render_summaries,
     "primer": render_primer,
+    "signatures": render_signatures,
 }
 
 

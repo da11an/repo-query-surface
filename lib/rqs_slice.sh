@@ -100,5 +100,5 @@ EOF
     # Extract slice with line numbers
     sed -n "${start_line},${end_line}p" "$resolved" \
         | awk -v start="$start_line" '{printf "%*d: %s\n", length(start+NR), start+NR-1, $0}' \
-        | rqs_render slice "$rel" "$lang"
+        | rqs_render slice "$rel" "$lang" --lines "$start_line" "$end_line"
 }

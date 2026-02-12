@@ -280,10 +280,12 @@ primer_command_reference() {
 | `rqs tree [path] [--depth N]` | Filtered directory tree |
 | `rqs symbols [file\|dir]` | Symbol index via ctags |
 | `rqs outline <file>` | Structural outline of a single file |
+| `rqs signatures [file\|dir]` | Behavioral sketch (signatures, returns, docstrings) |
 | `rqs slice <file> <start> <end>` | Extract code slice with line numbers |
 | `rqs definition <symbol>` | Find where a symbol is defined |
 | `rqs references <symbol>` | Find call sites / usage |
 | `rqs deps <file>` | Show imports (internal vs external) |
 | `rqs grep <pattern> [--scope dir]` | Structured regex search |
+| `rqs prompt [task]` | LLM-facing orientation and task framing |
 EOF
 }

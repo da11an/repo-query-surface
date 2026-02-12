@@ -83,6 +83,7 @@ test_tree() {
     local output
     output=$("$RQS" --repo "$FIXTURE_DIR" tree)
     assert_contains "tree shows root" "$output" "## Tree"
+    assert_contains "tree has description" "$output" "Filtered directory structure from git-tracked files"
     assert_contains "tree shows src dir" "$output" "src/"
     assert_contains "tree shows lib dir" "$output" "lib/"
     assert_contains "tree shows docs dir" "$output" "docs/"
@@ -110,6 +111,7 @@ test_symbols() {
     assert_contains "symbols shows Application class" "$output" "Application"
     assert_contains "symbols shows main function" "$output" "main"
     assert_contains "symbols header" "$output" "## Symbols"
+    assert_contains "symbols has description" "$output" "Symbol index extracted via ctags"
 }
 
 # ── Test: Outline ───────────────────────────────────────────────────────────
@@ -120,6 +122,7 @@ test_outline() {
     local output
     output=$("$RQS" --repo "$FIXTURE_DIR" outline src/main.py 2>&1)
     assert_contains "outline header" "$output" "## Outline"
+    assert_contains "outline has description" "$output" "Structural hierarchy of symbols"
     assert_contains "outline shows Application" "$output" "Application"
     assert_contains "outline shows start method" "$output" "start"
     assert_contains "outline shows stop method" "$output" "stop"
@@ -133,6 +136,8 @@ test_slice() {
     local output
     output=$("$RQS" --repo "$FIXTURE_DIR" slice src/main.py 1 5)
     assert_contains "slice header" "$output" "## Slice"
+    assert_contains "slice has line range" "$output" "(lines 1-5)"
+    assert_contains "slice has description" "$output" "Code extract with line numbers"
     assert_contains "slice has python fence" "$output" '```python'
     assert_contains "slice shows docstring" "$output" "Main entry point"
     assert_contains "slice has line numbers" "$output" "1:"
@@ -151,6 +156,7 @@ test_definition() {
     output=$("$RQS" --repo "$FIXTURE_DIR" definition Application 2>&1)
     assert_contains "definition finds class" "$output" "src/main.py"
     assert_contains "definition header" "$output" "## Definition"
+    assert_contains "definition has description" "$output" "Source locations where this symbol is defined"
 }
 
 # ── Test: References ───────────────────────────────────────────────────────
@@ -161,6 +167,7 @@ test_references() {
     local output
     output=$("$RQS" --repo "$FIXTURE_DIR" references format_output 2>&1)
     assert_contains "references header" "$output" "## References"
+    assert_contains "references has description" "$output" "Call sites and usage"
     assert_contains "references finds usage in main.py" "$output" "main.py"
 }
 
@@ -172,6 +179,7 @@ test_deps() {
     local output
     output=$("$RQS" --repo "$FIXTURE_DIR" deps src/main.py 2>&1)
     assert_contains "deps header" "$output" "## Dependencies"
+    assert_contains "deps has description" "$output" "Import analysis"
     assert_contains "deps shows external os" "$output" "os"
     assert_contains "deps shows external sys" "$output" "sys"
 }
@@ -184,6 +192,7 @@ test_grep() {
     local output
     output=$("$RQS" --repo "$FIXTURE_DIR" grep "def " 2>&1)
     assert_contains "grep header" "$output" '## Grep: `def `'
+    assert_contains "grep has description" "$output" "Regex search results across git-tracked files"
     assert_contains "grep finds functions" "$output" "def "
 
     output=$("$RQS" --repo "$FIXTURE_DIR" grep "class Application" 2>&1)
@@ -217,6 +226,7 @@ test_help() {
     assert_contains "help lists tree" "$output" "tree"
     assert_contains "help lists symbols" "$output" "symbols"
     assert_contains "help lists primer" "$output" "primer"
+    assert_contains "help lists prompt" "$output" "prompt"
 
     # Subcommand help
     output=$("$RQS" --repo "$FIXTURE_DIR" tree --help)
@@ -224,6 +234,69 @@ test_help() {
 
     output=$("$RQS" --repo "$FIXTURE_DIR" slice --help)
     assert_contains "slice --help" "$output" "Usage: rqs slice"
+}
+
+# ── Test: Prompt ───────────────────────────────────────────────────────────
+
+test_prompt() {
+    echo "Testing: prompt"
+
+    local output
+    output=$("$RQS" --repo "$FIXTURE_DIR" prompt)
+    assert_contains "prompt has orientation header" "$output" "# Repository Context Instructions"
+    assert_contains "prompt has how to read" "$output" "## How to Read the Context"
+    assert_contains "prompt has how to request" "$output" "## How to Request More Context"
+    assert_contains "prompt has command table" "$output" "rqs slice"
+    assert_not_contains "prompt general has no task" "$output" "## Task:"
+
+    # Task variants
+    output=$("$RQS" --repo "$FIXTURE_DIR" prompt debug)
+    assert_contains "prompt debug has task section" "$output" "## Task: Debug"
+    assert_contains "prompt debug has orientation" "$output" "# Repository Context Instructions"
+
+    output=$("$RQS" --repo "$FIXTURE_DIR" prompt feature)
+    assert_contains "prompt feature has task section" "$output" "## Task: Feature Design"
+
+    output=$("$RQS" --repo "$FIXTURE_DIR" prompt review)
+    assert_contains "prompt review has task section" "$output" "## Task: Code Review"
+
+    output=$("$RQS" --repo "$FIXTURE_DIR" prompt explain)
+    assert_contains "prompt explain has task section" "$output" "## Task: Code Explanation"
+
+    # Help
+    output=$("$RQS" --repo "$FIXTURE_DIR" prompt --help)
+    assert_contains "prompt help" "$output" "Usage: rqs prompt"
+
+    # Error: unknown task
+    assert_exit_code "prompt unknown task" 1 "$RQS" --repo "$FIXTURE_DIR" prompt bogus
+}
+
+# ── Test: Signatures ────────────────────────────────────────────────────────
+
+test_signatures() {
+    echo "Testing: signatures"
+
+    local output
+    output=$("$RQS" --repo "$FIXTURE_DIR" signatures src/main.py 2>&1)
+    assert_contains "signatures header" "$output" "## Signatures"
+    assert_contains "signatures has description" "$output" "Behavioral sketch"
+    assert_contains "signatures shows class" "$output" "class Application:"
+    assert_contains "signatures shows method" "$output" "def start(self):"
+    assert_contains "signatures shows __init__" "$output" "def __init__(self, name):"
+    assert_contains "signatures shows docstring" "$output" "# Start the application."
+    assert_contains "signatures shows return" "$output" "return format_output"
+    assert_not_contains "signatures hides implementation" "$output" "self.running = False"
+    assert_not_contains "signatures hides assignment" "$output" "self.running = True"
+
+    # Directory mode
+    output=$("$RQS" --repo "$FIXTURE_DIR" signatures src/ 2>&1)
+    assert_contains "signatures dir has main.py" "$output" 'Signatures: `src/main.py`'
+    assert_contains "signatures dir has helpers.py" "$output" 'Signatures: `src/utils/helpers.py`'
+    assert_contains "signatures dir has format_output" "$output" "def format_output"
+
+    # Help
+    output=$("$RQS" --repo "$FIXTURE_DIR" signatures --help 2>&1)
+    assert_contains "signatures help" "$output" "Usage: rqs signatures"
 }
 
 # ── Test: Error Handling ────────────────────────────────────────────────────
@@ -254,6 +327,8 @@ test_symbols
 echo ""
 test_outline
 echo ""
+test_signatures
+echo ""
 test_slice
 echo ""
 test_definition
@@ -265,6 +340,8 @@ echo ""
 test_grep
 echo ""
 test_primer
+echo ""
+test_prompt
 echo ""
 test_errors
 

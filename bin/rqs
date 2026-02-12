@@ -50,12 +50,14 @@ Commands:
   tree [path] [--depth N]        Filtered directory tree
   symbols [file|dir]             Symbol index via ctags
   outline <file>                 Structural outline of a single file
+  signatures [file|dir]          Behavioral sketch (signatures, returns, docstrings)
   slice <file> <start> <end>     Extract code slice with line numbers
   definition <symbol>            Find where a symbol is defined
   references <symbol>            Find call sites / usage
   deps <file>                    Show imports (internal vs external)
   grep <pattern> [--scope dir]   Structured regex search
   primer                         Generate complete static primer
+  prompt [task]                  LLM-facing orientation and task framing
 
 Global options:
   --repo <path>   Target repository (default: walk up from $PWD)
@@ -104,6 +106,10 @@ case "$COMMAND" in
         source "$RQS_LIB_DIR/rqs_outline.sh"
         cmd_outline "$@"
         ;;
+    signatures)
+        source "$RQS_LIB_DIR/rqs_signatures.sh"
+        cmd_signatures "$@"
+        ;;
     slice)
         source "$RQS_LIB_DIR/rqs_slice.sh"
         cmd_slice "$@"
@@ -127,6 +133,10 @@ case "$COMMAND" in
     primer)
         source "$RQS_LIB_DIR/rqs_primer.sh"
         cmd_primer "$@"
+        ;;
+    prompt)
+        source "$RQS_LIB_DIR/rqs_prompt.sh"
+        cmd_prompt "$@"
         ;;
     *)
         echo "error: unknown command '$COMMAND' (try 'rqs --help')" >&2

@@ -48,11 +48,14 @@ rqs primer              # Full primer: tree + symbols + deps + command reference
 rqs tree                # Directory tree
 rqs symbols             # Symbol index (classes, functions, types)
 rqs outline src/app.py  # Structural outline of one file
+rqs signatures src/     # Behavioral sketch (signatures + returns + docstrings)
 rqs slice src/app.py 10 30   # Lines 10-30 with line numbers
 rqs definition MyClass  # Where is MyClass defined?
 rqs references MyClass  # Where is MyClass used?
 rqs deps src/app.py     # Imports: internal vs external
 rqs grep "TODO"         # Structured regex search
+rqs prompt              # LLM orientation instructions
+rqs prompt debug        # Orientation + debugging task framing
 
 # Target a different repo:
 rqs --repo /path/to/other/repo primer
@@ -104,6 +107,18 @@ Structural outline of a single file. Shows symbol hierarchy with line spans.
 rqs outline lib/render.py
 ```
 
+### `rqs signatures [file|dir]`
+
+Behavioral sketch of Python files: class/function headers with decorators, first-line docstrings (as `#` comments), and return statements. Implementation details are stripped away, giving an LLM enough to understand API contracts and control flow without the noise of full source.
+
+```bash
+rqs signatures src/app.py      # One file
+rqs signatures src/             # All .py files in a directory
+rqs signatures                  # All .py files in the repo
+```
+
+Currently supports Python files via AST analysis.
+
 ### `rqs slice <file> <start> <end>`
 
 Extract an exact code slice with line numbers and language-appropriate syntax highlighting.
@@ -151,6 +166,20 @@ rqs grep "class.*Error" --scope src/
 rqs grep "def test_" --context 0 --max 20
 ```
 
+### `rqs prompt [task]`
+
+Generate LLM-facing orientation text. Explains how to read rqs output sections, how to request additional context using the command vocabulary, and optionally includes task-specific framing.
+
+```bash
+rqs prompt              # General orientation
+rqs prompt debug        # + debugging approach
+rqs prompt feature      # + feature design approach
+rqs prompt review       # + code review approach
+rqs prompt explain      # + code explanation approach
+```
+
+Paste the output at the start of an LLM conversation (before or after the primer) to give the LLM instructions for working with rqs context.
+
 ## Per-Repo Configuration
 
 Create a `.rqsrc` file in the target repo root to override defaults:
@@ -170,13 +199,14 @@ Only `RQS_`-prefixed key=value lines are accepted. No command substitution or sh
 
 ## Typical Workflow
 
-1. **Generate a primer** and paste it into your LLM conversation:
+1. **Generate orientation and a primer** and paste them into your LLM conversation:
    ```bash
-   rqs primer | pbcopy   # macOS
-   rqs primer | xclip    # Linux
+   rqs prompt debug | pbcopy         # Orientation + task framing
+   rqs primer | pbcopy               # Structural primer
+   # or combine: { rqs prompt debug; echo; rqs primer; } | pbcopy
    ```
 
-2. The LLM reads the primer and asks follow-up questions using the command vocabulary it saw in the reference card.
+2. The LLM reads the orientation and primer, understanding both the command vocabulary and the task at hand.
 
 3. **You run the commands it asks for** and paste the output back:
    ```bash
