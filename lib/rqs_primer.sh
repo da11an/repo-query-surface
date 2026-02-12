@@ -1,27 +1,33 @@
 #!/usr/bin/env bash
-# rqs_primer.sh — generate complete static primer
+# rqs_primer.sh — generate tiered static primer
 
 cmd_primer() {
     local tree_depth="$RQS_PRIMER_TREE_DEPTH"
     local max_symbols="$RQS_PRIMER_MAX_SYMBOLS"
+    local level="medium"
+    local task=""
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --tree-depth) tree_depth="$2"; shift 2 ;;
             --max-symbols) max_symbols="$2"; shift 2 ;;
+            --light) level="light"; shift ;;
+            --medium) level="medium"; shift ;;
+            --heavy) level="heavy"; shift ;;
+            --task) task="$2"; shift 2 ;;
             --help)
                 cat <<'EOF'
-Usage: rqs primer [--tree-depth N] [--max-symbols N]
+Usage: rqs primer [--light|--medium|--heavy] [--task TASK] [--tree-depth N] [--max-symbols N]
 
-Generate a complete static primer for the repository, including:
-  - Repository header
-  - Directory tree
-  - Symbol index
-  - Module summaries
-  - Dependency wiring
-  - Available commands reference
+Generate a tiered static primer for the repository.
+
+Tiers:
+  --light    Quick orientation: prompt + header + tree
+  --medium   Standard (default): light + symbols + module summaries
+  --heavy    Full sketch: medium + signatures + dependency wiring
 
 Options:
+  --task TASK        Include task-specific framing (debug, feature, review, explain)
   --tree-depth N     Maximum tree depth (default: from config)
   --max-symbols N    Maximum symbols to include (default: from config)
   --help             Show this help
@@ -33,35 +39,54 @@ EOF
         esac
     done
 
+    # ── Source dependencies ──
+    source "$RQS_LIB_DIR/rqs_prompt.sh"
+
+    # ── Prompt orientation (all tiers) ──
+    if [[ -n "$task" ]]; then
+        cmd_prompt "$task"
+    else
+        cmd_prompt
+    fi
+    echo ""
+
     local repo_name
     repo_name=$(basename "$(readlink -f "$RQS_TARGET_REPO")")
 
-    # ── Header ──
+    # ── Header (all tiers) ──
     echo "# Repository Primer: \`${repo_name}\`"
     echo ""
 
     # Include README summary if available
     primer_readme_summary
 
-    # ── Tree Section ──
+    # ── Tree (all tiers) ──
     echo ""
     rqs_list_files | rqs_render tree --depth "$tree_depth" --root "."
     echo ""
 
-    # ── Symbol Index ──
-    primer_symbol_index "$max_symbols"
-    echo ""
+    # ── Medium and heavy ──
+    if [[ "$level" == "medium" || "$level" == "heavy" ]]; then
+        # ── Symbol Index ──
+        primer_symbol_index "$max_symbols"
+        echo ""
 
-    # ── Module Summaries ──
-    primer_module_summaries
-    echo ""
+        # ── Module Summaries ──
+        primer_module_summaries
+        echo ""
+    fi
 
-    # ── Dependency Wiring ──
-    primer_dependency_wiring
-    echo ""
+    # ── Heavy only ──
+    if [[ "$level" == "heavy" ]]; then
+        # ── Signatures (whole repo) ──
+        source "$RQS_LIB_DIR/rqs_signatures.sh"
+        cmd_signatures
+        echo ""
 
-    # ── Command Reference ──
-    primer_command_reference
+        # ── Dependency Wiring ──
+        primer_dependency_wiring
+        echo ""
+    fi
 }
 
 primer_readme_summary() {
@@ -93,7 +118,7 @@ primer_symbol_index() {
         local tags_data
         tags_data=$(rqs_list_files | while IFS= read -r f; do
             (cd "$RQS_TARGET_REPO" && ctags --output-format=json --fields=+nKSse -f - "$f" 2>/dev/null)
-        done | head -n "$max_symbols")
+        done | head -n "$max_symbols") || true
 
         if [[ -n "$tags_data" ]]; then
             echo "$tags_data" | rqs_render symbols --kinds "$RQS_SYMBOL_KINDS"
@@ -269,23 +294,4 @@ if internal:
             echo "| \`$f\` | $internal_deps |"
         fi
     done
-}
-
-primer_command_reference() {
-    cat <<'EOF'
-## Available Commands
-
-| Command | Purpose |
-|---------|---------|
-| `rqs tree [path] [--depth N]` | Filtered directory tree |
-| `rqs symbols [file\|dir]` | Symbol index via ctags |
-| `rqs outline <file>` | Structural outline of a single file |
-| `rqs signatures [file\|dir]` | Behavioral sketch (signatures, returns, docstrings) |
-| `rqs slice <file> <start> <end>` | Extract code slice with line numbers |
-| `rqs definition <symbol>` | Find where a symbol is defined |
-| `rqs references <symbol>` | Find call sites / usage |
-| `rqs deps <file>` | Show imports (internal vs external) |
-| `rqs grep <pattern> [--scope dir]` | Structured regex search |
-| `rqs prompt [task]` | LLM-facing orientation and task framing |
-EOF
 }

@@ -56,7 +56,8 @@ Commands:
   references <symbol>            Find call sites / usage
   deps <file>                    Show imports (internal vs external)
   grep <pattern> [--scope dir]   Structured regex search
-  primer                         Generate complete static primer
+  primer [--light|--medium|--heavy] [--task TASK]
+                                 Generate tiered static primer
   prompt [task]                  LLM-facing orientation and task framing
 
 Global options:

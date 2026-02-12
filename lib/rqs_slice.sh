@@ -19,8 +19,6 @@ Options:
   start     Starting line number
   end       Ending line number
   --help    Show this help
-
-The maximum slice size is controlled by RQS_SLICE_MAX_LINES (default: 200).
 EOF
                 return 0
                 ;;
@@ -51,11 +49,6 @@ EOF
 
     if [[ "$start_line" -gt "$end_line" ]]; then
         rqs_error "slice: start ($start_line) must be <= end ($end_line)"
-    fi
-
-    local span=$((end_line - start_line + 1))
-    if [[ "$span" -gt "$RQS_SLICE_MAX_LINES" ]]; then
-        rqs_error "slice: requested $span lines exceeds maximum ($RQS_SLICE_MAX_LINES)"
     fi
 
     local resolved

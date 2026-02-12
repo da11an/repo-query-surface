@@ -44,7 +44,7 @@ No compilation, no virtual environments, no dependencies to install.
 
 ```bash
 # From inside any git repository:
-rqs primer              # Full primer: tree + symbols + deps + command reference
+rqs primer              # Standard primer: orientation + tree + symbols + summaries
 rqs tree                # Directory tree
 rqs symbols             # Symbol index (classes, functions, types)
 rqs outline src/app.py  # Structural outline of one file
@@ -63,19 +63,24 @@ rqs --repo /path/to/other/repo primer
 
 ## Commands
 
-### `rqs primer`
+### `rqs primer [--light|--medium|--heavy] [--task TASK]`
 
-The starting point. Generates a single markdown document containing:
-- Repository tree (depth-limited)
-- Symbol index (classes, functions, types)
-- Module summaries (file counts and types per directory)
-- Internal dependency wiring
-- Command reference card
+The starting point. Generates a tiered markdown document combining prompt orientation with repository context. Three detail levels:
 
-Paste this into an LLM conversation to give it structural awareness of the repo, then use the other commands to answer its follow-up questions.
+| Tier | Content |
+|------|---------|
+| `--light` | Prompt orientation + repo header + README summary + tree |
+| `--medium` (default) | Light + symbol index + module summaries |
+| `--heavy` | Medium + signatures (whole repo) + dependency wiring |
+
+Use `--task TASK` to include task-specific framing (debug, feature, review, explain) — the same framing available via `rqs prompt`.
 
 ```bash
-rqs primer
+rqs primer                          # Standard (medium) primer
+rqs primer --light                  # Quick orientation paste
+rqs primer --heavy                  # Full behavioral sketch
+rqs primer --task debug             # Medium primer with debugging framing
+rqs primer --light --task review    # Quick primer with code review framing
 rqs primer --tree-depth 2 --max-symbols 200
 ```
 
@@ -126,8 +131,6 @@ Extract an exact code slice with line numbers and language-appropriate syntax hi
 ```bash
 rqs slice src/app.py 10 30
 ```
-
-Limited to 200 lines per slice (configurable via `RQS_SLICE_MAX_LINES`).
 
 ### `rqs definition <symbol>`
 
@@ -188,7 +191,6 @@ Create a `.rqsrc` file in the target repo root to override defaults:
 RQS_TREE_DEPTH=6
 RQS_GREP_CONTEXT=3
 RQS_GREP_MAX_RESULTS=100
-RQS_SLICE_MAX_LINES=300
 RQS_REF_MAX_RESULTS=50
 RQS_PRIMER_TREE_DEPTH=4
 RQS_PRIMER_MAX_SYMBOLS=1000
@@ -199,11 +201,11 @@ Only `RQS_`-prefixed key=value lines are accepted. No command substitution or sh
 
 ## Typical Workflow
 
-1. **Generate orientation and a primer** and paste them into your LLM conversation:
+1. **Generate a primer** and paste it into your LLM conversation:
    ```bash
-   rqs prompt debug | pbcopy         # Orientation + task framing
-   rqs primer | pbcopy               # Structural primer
-   # or combine: { rqs prompt debug; echo; rqs primer; } | pbcopy
+   rqs primer --task debug | pbcopy              # Standard primer + debug framing
+   rqs primer --light --task review | pbcopy      # Quick primer + review framing
+   rqs primer --heavy | pbcopy                    # Full primer for deep analysis
    ```
 
 2. The LLM reads the orientation and primer, understanding both the command vocabulary and the task at hand.
