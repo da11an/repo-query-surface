@@ -261,6 +261,11 @@ test_primer() {
     assert_contains "primer heavy deps summary" "$output" "Internal Python imports:"
     assert_contains "primer heavy deps table header" "$output" "| Internal Module | Import Count | Imported By Files |"
     assert_contains "primer heavy deps has fixture import" "$output" "| \`src.utils.helpers\` | 1 | 1 |"
+    assert_contains "primer heavy has import topology" "$output" "## Import Topology"
+    assert_contains "primer heavy topology hubs" "$output" "### Top Hubs (Most Imported Files)"
+    assert_contains "primer heavy topology bridges" "$output" "### Top Bridges (Flow Centrality)"
+    assert_contains "primer heavy topology layers" "$output" "### Layer Map (Foundation -> Orchestration)"
+    assert_contains "primer heavy topology edge table" "$output" "| Importer | Imported | Layer Drop | Score |"
     assert_contains "primer heavy has hotspots" "$output" "## Heuristic Risk Hotspots"
 
     # Task flag

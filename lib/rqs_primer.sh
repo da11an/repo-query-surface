@@ -256,12 +256,12 @@ primer_dependency_wiring() {
         return
     fi
 
-    # Python dependency graph (aggregated and ranked)
+    # Python dependency graph (aggregated/ranked + topology)
     python3 - "$RQS_TARGET_REPO" "$max_all" "$top_n" 3<<<"$py_files" <<'PY'
 import ast
 import os
 import sys
-from collections import Counter, defaultdict
+from collections import Counter, defaultdict, deque
 
 repo_root = sys.argv[1]
 try:
@@ -280,6 +280,8 @@ if not py_files:
     sys.exit(0)
 
 py_set = set(py_files)
+adj = {p: set() for p in py_set}
+rev_adj = {p: set() for p in py_set}
 
 # Detect likely source roots to support src/ layouts.
 source_roots = {""}
@@ -351,6 +353,21 @@ def resolve_relative_import(pkg, level, module):
     return ".".join(p for p in parts if p)
 
 
+def resolve_module_to_file(module):
+    if not module:
+        return None
+    rel = module_to_rel(module)
+    for root in source_roots:
+        prefix = f"{root}/" if root else ""
+        py_candidate = f"{prefix}{rel}.py"
+        init_candidate = f"{prefix}{rel}/__init__.py"
+        if py_candidate in py_set:
+            return py_candidate
+        if init_candidate in py_set:
+            return init_candidate
+    return None
+
+
 counts = Counter()
 importers = defaultdict(set)
 
@@ -363,37 +380,49 @@ for rel_path in sorted(py_set):
         continue
 
     pkg = current_package(rel_path)
-    seen_edges = set()
+    seen_modules = set()
 
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
                 mod = alias.name
                 if is_internal_module(mod):
-                    seen_edges.add(mod)
+                    seen_modules.add(mod)
         elif isinstance(node, ast.ImportFrom):
             base = ""
             if node.level > 0:
                 base = resolve_relative_import(pkg, node.level, node.module)
                 if base and is_internal_module(base):
-                    seen_edges.add(base)
+                    seen_modules.add(base)
             elif node.module:
                 base = node.module
                 if is_internal_module(base):
-                    seen_edges.add(base)
+                    seen_modules.add(base)
 
             # Handle "from X import Y" where Y may be a submodule.
-            if base:
+            if node.level > 0 and node.module is None:
+                # Handle "from . import foo, bar" style imports.
+                for alias in node.names:
+                    if alias.name == "*":
+                        continue
+                    candidate = f"{base}.{alias.name}" if base else alias.name
+                    if is_internal_module(candidate):
+                        seen_modules.add(candidate)
+            elif base:
                 for alias in node.names:
                     if alias.name == "*":
                         continue
                     candidate = f"{base}.{alias.name}"
                     if is_internal_module(candidate):
-                        seen_edges.add(candidate)
+                        seen_modules.add(candidate)
 
-    for mod in seen_edges:
+    for mod in seen_modules:
         counts[mod] += 1
         importers[mod].add(rel_path)
+        target_file = resolve_module_to_file(mod)
+        if target_file and target_file != rel_path:
+            adj[rel_path].add(target_file)
+            rev_adj[target_file].add(rel_path)
 
 if not counts:
     print("*(no internal dependencies detected)*")
@@ -421,5 +450,230 @@ print("| Internal Module | Import Count | Imported By Files |")
 print("|-----------------|--------------|-------------------|")
 for module, count in shown:
     print(f"| `{module}` | {count} | {len(importers[module])} |")
+
+edge_count = sum(len(v) for v in adj.values())
+if edge_count == 0:
+    print("")
+    print("## Import Topology")
+    print("")
+    print("*(no internal file-to-file import edges detected)*")
+    sys.exit(0)
+
+
+def topological_sort(nodes, graph):
+    indeg = {n: 0 for n in nodes}
+    for n in nodes:
+        for m in graph[n]:
+            indeg[m] += 1
+    q = deque(sorted(n for n in nodes if indeg[n] == 0))
+    out = []
+    while q:
+        n = q.popleft()
+        out.append(n)
+        for m in sorted(graph[n]):
+            indeg[m] -= 1
+            if indeg[m] == 0:
+                q.append(m)
+    return out
+
+
+def tarjan_scc(nodes, graph):
+    sys.setrecursionlimit(max(2000, len(nodes) * 4))
+    index = 0
+    indices = {}
+    lowlink = {}
+    stack = []
+    on_stack = set()
+    components = []
+
+    def strongconnect(v):
+        nonlocal index
+        indices[v] = index
+        lowlink[v] = index
+        index += 1
+        stack.append(v)
+        on_stack.add(v)
+
+        for w in graph[v]:
+            if w not in indices:
+                strongconnect(w)
+                lowlink[v] = min(lowlink[v], lowlink[w])
+            elif w in on_stack:
+                lowlink[v] = min(lowlink[v], indices[w])
+
+        if lowlink[v] == indices[v]:
+            comp = []
+            while True:
+                w = stack.pop()
+                on_stack.remove(w)
+                comp.append(w)
+                if w == v:
+                    break
+            components.append(comp)
+
+    for n in nodes:
+        if n not in indices:
+            strongconnect(n)
+    return components
+
+
+def brandes_betweenness(nodes, graph, max_sources=120):
+    ordered = sorted(nodes)
+    if not ordered:
+        return {}, False, 0
+
+    approx = False
+    if len(ordered) > max_sources:
+        step = max(1, len(ordered) // max_sources)
+        sources = ordered[::step][:max_sources]
+        approx = True
+    else:
+        sources = ordered
+
+    scale = len(ordered) / len(sources)
+    bc = {n: 0.0 for n in ordered}
+
+    for s in sources:
+        stack = []
+        pred = defaultdict(list)
+        sigma = defaultdict(float)
+        sigma[s] = 1.0
+        dist = {s: 0}
+        q = deque([s])
+
+        while q:
+            v = q.popleft()
+            stack.append(v)
+            for w in graph[v]:
+                if w not in dist:
+                    dist[w] = dist[v] + 1
+                    q.append(w)
+                if dist[w] == dist[v] + 1:
+                    sigma[w] += sigma[v]
+                    pred[w].append(v)
+
+        delta = defaultdict(float)
+        while stack:
+            w = stack.pop()
+            for v in pred[w]:
+                if sigma[w] > 0:
+                    delta[v] += (sigma[v] / sigma[w]) * (1.0 + delta[w])
+            if w != s:
+                bc[w] += delta[w]
+
+    for n in bc:
+        bc[n] *= scale
+    return bc, approx, len(sources)
+
+
+nodes = sorted(py_set)
+sccs = tarjan_scc(nodes, adj)
+node_to_comp = {}
+for i, comp in enumerate(sccs):
+    for n in comp:
+        node_to_comp[n] = i
+
+comp_adj = {i: set() for i in range(len(sccs))}
+for src in nodes:
+    c_src = node_to_comp[src]
+    for dst in adj[src]:
+        c_dst = node_to_comp[dst]
+        if c_src != c_dst:
+            comp_adj[c_src].add(c_dst)
+
+comp_order = topological_sort(sorted(comp_adj.keys()), comp_adj)
+comp_layer = {}
+for c in reversed(comp_order):
+    if not comp_adj[c]:
+        comp_layer[c] = 0
+    else:
+        comp_layer[c] = 1 + max(comp_layer[n] for n in comp_adj[c])
+
+file_layer = {n: comp_layer[node_to_comp[n]] for n in nodes}
+max_layer = max(file_layer.values()) if file_layer else 0
+
+fan_in = {n: len(rev_adj[n]) for n in nodes}
+fan_out = {n: len(adj[n]) for n in nodes}
+betweenness, bc_approx, bc_sources = brandes_betweenness(nodes, adj)
+
+cyclic_components = [c for c in sccs if len(c) > 1]
+largest_scc = max((len(c) for c in sccs), default=0)
+
+print("")
+print("## Import Topology")
+print(
+    f"> Directed internal file graph: {len(nodes)} Python files, {edge_count} edges, "
+    f"{len(sccs)} SCCs, max dependency depth {max_layer}."
+)
+if largest_scc > 1:
+    print(
+        f"> Circular imports detected: {len(cyclic_components)} SCCs with cycles "
+        f"(largest size {largest_scc})."
+    )
+else:
+    print("> No circular imports detected (all SCCs are size 1).")
+
+top_k = 10
+
+print("")
+print("### Top Hubs (Most Imported Files)")
+print("| File | Fan-In | Fan-Out | Layer |")
+print("|------|--------|---------|-------|")
+for f in sorted(nodes, key=lambda n: (-fan_in[n], -fan_out[n], n))[:top_k]:
+    print(f"| `{f}` | {fan_in[f]} | {fan_out[f]} | {file_layer[f]} |")
+
+print("")
+print("### Top Bridges (Flow Centrality)")
+if bc_approx:
+    print(
+        f"> Betweenness centrality is approximated from {bc_sources} sampled source files."
+    )
+print("| File | Bridge Score | Fan-In | Fan-Out | Layer |")
+print("|------|--------------|--------|---------|-------|")
+for f in sorted(nodes, key=lambda n: (-betweenness[n], -fan_in[n], n))[:top_k]:
+    print(
+        f"| `{f}` | {betweenness[f]:.2f} | {fan_in[f]} | {fan_out[f]} | {file_layer[f]} |"
+    )
+
+print("")
+print("### Layer Map (Foundation -> Orchestration)")
+layers = defaultdict(list)
+for f in nodes:
+    layers[file_layer[f]].append(f)
+
+shown_layers = sorted(layers.keys())
+max_layers_to_show = 8
+omitted = 0
+if len(shown_layers) > max_layers_to_show:
+    omitted = len(shown_layers) - max_layers_to_show
+    shown_layers = shown_layers[: max_layers_to_show - 1] + [shown_layers[-1]]
+
+files_per_layer = 8
+for layer in shown_layers:
+    entries = sorted(layers[layer], key=lambda n: (-fan_in[n], n))
+    preview = entries[:files_per_layer]
+    preview_text = ", ".join(f"`{p}`" for p in preview)
+    if len(entries) > files_per_layer:
+        preview_text += f", ... (+{len(entries) - files_per_layer} more)"
+    label = "foundations" if layer == 0 else f"layer {layer}"
+    print(f"- L{layer} ({label}): {preview_text}")
+if omitted > 0:
+    print(f"- ... {omitted} middle layers omitted for brevity")
+
+print("")
+print("### Key Dependency Links")
+print("| Importer | Imported | Layer Drop | Score |")
+print("|----------|----------|------------|-------|")
+edge_rows = []
+for src in nodes:
+    for dst in adj[src]:
+        layer_drop = file_layer[src] - file_layer[dst]
+        score = (fan_out[src] + 1) * (fan_in[dst] + 1) * (max(layer_drop, 0) + 1)
+        edge_rows.append((score, src, dst, layer_drop))
+
+for score, src, dst, layer_drop in sorted(
+    edge_rows, key=lambda item: (-item[0], item[1], item[2])
+)[:12]:
+    print(f"| `{src}` | `{dst}` | {layer_drop} | {score} |")
 PY
 }

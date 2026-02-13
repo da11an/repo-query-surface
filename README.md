@@ -78,9 +78,9 @@ The starting point. Generates a tiered markdown document combining prompt orient
 |------|---------|
 | `--light` | Prompt orientation + repo header + README summary + fast-start map + runtime boundaries + tree |
 | `--medium` (default) | Light + behavioral contract from tests + critical path files + symbol index + module summaries |
-| `--heavy` | Medium + signatures (whole repo) + dependency wiring + heuristic risk hotspots |
+| `--heavy` | Medium + signatures (whole repo) + dependency wiring + import topology + heuristic risk hotspots |
 
-In Python repos, heavy-mode dependency wiring aggregates internal module imports with counts: if total modules are `<= RQS_PRIMER_DEPS_MAX_ALL`, it shows all; otherwise it shows top `RQS_PRIMER_DEPS_TOP_N` by import count.
+In Python repos, heavy-mode dependency wiring aggregates internal module imports with counts: if total modules are `<= RQS_PRIMER_DEPS_MAX_ALL`, it shows all; otherwise it shows top `RQS_PRIMER_DEPS_TOP_N` by import count. It also renders an `Import Topology` section with a directed file graph summary, hub/bridge rankings, dependency layers, and key links.
 
 Use `--task TASK` to include task-specific framing (debug, feature, review, explain) — the same framing available via `rqs prompt`.
 
