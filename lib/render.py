@@ -2001,4 +2001,9 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except BrokenPipeError:
+        # Downstream consumer closed the pipe early (for example, `| head`).
+        # Exit quietly instead of emitting a traceback.
+        sys.exit(0)

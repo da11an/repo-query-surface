@@ -341,6 +341,7 @@ test_signatures() {
     echo "Testing: signatures"
 
     local output
+    local status
     output=$("$RQS" --repo "$FIXTURE_DIR" signatures src/main.py 2>&1)
     assert_contains "signatures header" "$output" "## Signatures"
     assert_contains "signatures has description" "$output" "Behavioral sketch"
@@ -367,6 +368,22 @@ test_signatures() {
     # Help
     output=$("$RQS" --repo "$FIXTURE_DIR" signatures --help 2>&1)
     assert_contains "signatures help" "$output" "Usage: rqs signatures"
+
+    # Regression: piped output should exit cleanly when consumer closes early
+    set +e
+    output=$("$RQS" --repo "$FIXTURE_DIR" signatures 2>&1 | head -n 5)
+    status=$?
+    set -e
+    if [[ "$status" -eq 0 ]]; then
+        PASS=$((PASS + 1))
+        echo "  PASS: signatures piped output exits cleanly"
+    else
+        FAIL=$((FAIL + 1))
+        ERRORS="${ERRORS}\n  FAIL: signatures piped output exits cleanly\n    expected exit code 0, got $status"
+        echo "  FAIL: signatures piped output exits cleanly"
+    fi
+    assert_not_contains "signatures piped has no BrokenPipeError" "$output" "BrokenPipeError"
+    assert_not_contains "signatures piped has no traceback" "$output" "Traceback (most recent call last)"
 }
 
 # ── Test: Show ─────────────────────────────────────────────────────────────
