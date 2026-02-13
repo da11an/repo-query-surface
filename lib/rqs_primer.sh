@@ -142,8 +142,10 @@ primer_module_summaries() {
 
     # Build JSON summaries via Python
     echo "$file_list" | python3 -c "
-import json, sys, os
+import json, sys, os, re
 from collections import defaultdict
+
+repo_root = os.environ.get('RQS_TARGET_REPO', '.')
 
 files = [line.strip() for line in sys.stdin if line.strip()]
 if not files:
@@ -151,6 +153,7 @@ if not files:
 
 # Group files by top-level directory
 dirs = defaultdict(lambda: {'files': 0, 'types': defaultdict(int)})
+dir_symbols = defaultdict(list)
 
 for f in files:
     parts = f.split('/')
@@ -164,6 +167,19 @@ for f in files:
     if ext:
         dirs[dir_name]['types'][ext] += 1
 
+    # Scan for top-level symbols
+    filepath = os.path.join(repo_root, f)
+    try:
+        with open(filepath) as fh:
+            for line in fh:
+                m = re.match(r'^(?:class|def|function|struct|interface|type|enum)\s+(\w+)', line)
+                if m:
+                    sym = m.group(1)
+                    if sym not in dir_symbols[dir_name]:
+                        dir_symbols[dir_name].append(sym)
+    except (OSError, UnicodeDecodeError):
+        pass
+
 summaries = []
 for dir_name in sorted(dirs.keys()):
     info = dirs[dir_name]
@@ -171,7 +187,8 @@ for dir_name in sorted(dirs.keys()):
         'path': dir_name,
         'files': info['files'],
         'types': dict(info['types']),
-        'description': ''
+        'description': '',
+        'symbols': dir_symbols.get(dir_name, [])
     }
     summaries.append(entry)
 

@@ -50,10 +50,17 @@ rqs symbols             # Symbol index (classes, functions, types)
 rqs outline src/app.py  # Structural outline of one file
 rqs signatures src/     # Behavioral sketch (signatures + returns + docstrings)
 rqs slice src/app.py 10 30   # Lines 10-30 with line numbers
+rqs show MyClass process     # Full source of named symbols
+rqs context src/app.py 42    # Enclosing function for line 42
 rqs definition MyClass  # Where is MyClass defined?
 rqs references MyClass  # Where is MyClass used?
 rqs deps src/app.py     # Imports: internal vs external
 rqs grep "TODO"         # Structured regex search
+rqs diff main           # Changes compared to main branch
+rqs files "*.py"        # List Python files with line counts
+rqs callees process     # What does process() call?
+rqs related src/app.py  # Files connected to app.py
+rqs notebook nb/analysis.ipynb  # Notebook cells with truncated outputs
 rqs prompt              # LLM orientation instructions
 rqs prompt debug        # Orientation + debugging task framing
 
@@ -132,6 +139,24 @@ Extract an exact code slice with line numbers and language-appropriate syntax hi
 rqs slice src/app.py 10 30
 ```
 
+### `rqs show <symbol> [symbol...]`
+
+Extract the full source code of one or more named symbols. Uses ctags to locate definitions and their line spans. Multiple symbols can be requested in one call.
+
+```bash
+rqs show Application              # One symbol
+rqs show Application main         # Multiple symbols at once
+rqs show format_output             # Functions from any file
+```
+
+### `rqs context <file> <line>`
+
+Show the enclosing function or class for a given line number. Useful when you have a line number from a stack trace, grep result, or error message.
+
+```bash
+rqs context src/app.py 42         # What function is line 42 in?
+```
+
 ### `rqs definition <symbol>`
 
 Find where a symbol is defined. Returns file path, kind, and line number.
@@ -158,6 +183,61 @@ rqs deps src/main.py
 ```
 
 Supported languages: Python, JavaScript/TypeScript, Go, Ruby, Rust, Java, C/C++, Shell, CSS/SCSS.
+
+### `rqs diff [ref] [--staged]`
+
+Show git diff as structured markdown. Defaults to working tree changes. Accepts a branch, tag, or commit reference.
+
+```bash
+rqs diff                    # Unstaged working tree changes
+rqs diff --staged           # Staged changes
+rqs diff main               # Changes compared to main branch
+rqs diff HEAD~3             # Changes in last 3 commits
+```
+
+### `rqs files <glob>`
+
+List git-tracked files matching a glob pattern, with line counts. Useful for finding test files, configs, or files matching a naming convention.
+
+```bash
+rqs files "*.py"           # All Python files
+rqs files "test_*"         # Test files
+rqs files "src/**/*.js"    # JS files under src/
+rqs files "*config*"       # Config-related files
+```
+
+### `rqs callees <symbol>`
+
+Show what functions/methods a given symbol calls (outgoing edges). The inverse of `references` — instead of "who calls me?", it answers "what do I call?".
+
+```bash
+rqs callees process_request    # What does process_request call?
+rqs callees Application.start  # What does start() call?
+```
+
+### `rqs related <file>`
+
+Show files connected to a given file: files it imports (forward dependencies) and files that import it (reverse dependencies). A one-command "neighborhood" view.
+
+```bash
+rqs related src/main.py
+```
+
+### `rqs notebook <file> [--debug]`
+
+Extract structured content from a Jupyter notebook (`.ipynb`). Renders markdown cells as-is, code cells in fenced blocks, and outputs with smart truncation: text outputs show the first N lines, error tracebacks show the error name plus last frames, and rich outputs (images, HTML) show placeholders.
+
+With `--debug`, switches to error analysis mode: parses traceback frames, classifies each as notebook-local, repo-local, or external, extracts the enclosing function source for repo-local frames with a `>>>` marker on the error line, shows dependency chains for involved files, and produces a diagnostic summary with suggested `rqs` commands. If ctags is available, cross-references against the symbol table for richer context.
+
+```bash
+rqs notebook notebooks/analysis.ipynb
+rqs notebook notebooks/analysis.ipynb --debug
+RQS_NOTEBOOK_MAX_OUTPUT_LINES=20 rqs notebook demo.ipynb
+```
+
+Configuration:
+- `RQS_NOTEBOOK_MAX_OUTPUT_LINES` — max text output lines before truncation (default: 10)
+- `RQS_NOTEBOOK_MAX_TRACEBACK` — max traceback frames to show (default: 5)
 
 ### `rqs grep <pattern> [--scope dir] [--context N] [--max N]`
 

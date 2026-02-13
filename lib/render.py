@@ -8,6 +8,8 @@ Single script, multiple render modes. Stdlib only.
 import ast
 import json
 import os
+import re
+import subprocess
 import sys
 import warnings
 from collections import defaultdict
@@ -37,7 +39,7 @@ def build_tree(file_list, max_depth):
     return tree, dirs
 
 
-def render_tree_lines(tree, dirs, prefix="", path_prefix=""):
+def render_tree_lines(tree, dirs, prefix="", path_prefix="", line_counts=None):
     """Render tree dict into indented lines with box-drawing characters."""
     lines = []
     entries = sorted(tree.keys())
@@ -50,9 +52,13 @@ def render_tree_lines(tree, dirs, prefix="", path_prefix=""):
         if is_dir:
             lines.append(f"{prefix}{connector}{name}/")
             extension = "   " if is_last else "\u2502  "
-            lines.extend(render_tree_lines(children, dirs, prefix + extension, node_path))
+            lines.extend(render_tree_lines(children, dirs, prefix + extension, node_path, line_counts))
         else:
-            lines.append(f"{prefix}{connector}{name}")
+            lc = line_counts.get(node_path) if line_counts else None
+            if lc is not None:
+                lines.append(f"{prefix}{connector}{name} ({lc})")
+            else:
+                lines.append(f"{prefix}{connector}{name}")
     return lines
 
 
@@ -75,6 +81,17 @@ def render_tree(args):
         print("*(empty)*")
         return
 
+    # Compute line counts
+    repo_root = os.environ.get("RQS_TARGET_REPO", ".")
+    line_counts = {}
+    for f in file_list:
+        path = os.path.join(repo_root, f)
+        try:
+            with open(path, "rb") as fh:
+                line_counts[f] = sum(1 for _ in fh)
+        except OSError:
+            pass
+
     tree, dirs = build_tree(file_list, depth)
     root_label = root.rstrip("/") if root != "." else "."
     print(f"## Tree: `{root_label}`")
@@ -82,15 +99,13 @@ def render_tree(args):
     print(f"> Filtered directory structure from git-tracked files ({depth_info}, {len(file_list)} files). Request `rqs tree <path> --depth N` to explore subdirectories.")
     print(f"```")
     print(f"{root_label}/")
-    for line in render_tree_lines(tree, dirs):
+    for line in render_tree_lines(tree, dirs, line_counts=line_counts):
         print(line)
     print(f"```")
 
 
 # ── Symbol Rendering ───────────────────────────────────────────────────────
 
-
-# ── Symbol Rendering ───────────────────────────────────────────────────────
 
 CTAGS_KIND_MAP = {
     "c": "class",
@@ -128,6 +143,10 @@ def _parse_exuberant_tag_line(line: str):
 
     kind = CTAGS_KIND_MAP.get(kind_code, kind_code)
     line_no = None
+    end_no = None
+    sig = None
+    scope = None
+    scope_kind = None
 
     for field in extra:
         if field.startswith("line:"):
@@ -135,18 +154,41 @@ def _parse_exuberant_tag_line(line: str):
                 line_no = int(field.split(":", 1)[1])
             except ValueError:
                 pass
+        elif field.startswith("end:"):
+            try:
+                end_no = int(field.split(":", 1)[1])
+            except ValueError:
+                pass
+        elif field.startswith("signature:"):
+            sig = field.split(":", 1)[1]
+        elif ":" in field:
+            # Scope fields like class:ClassName, function:FuncName
+            fkey, fval = field.split(":", 1)
+            if fkey in ("class", "struct", "function", "enum", "interface", "namespace", "module"):
+                scope = fval
+                scope_kind = fkey
 
     if line_no is None:
         # Best-effort default; keeps sort stable without crashing
         line_no = 0
 
-    return {
+    tag = {
         "_type": "tag",
         "name": name,
         "path": path,
         "line": line_no,
         "kind": kind,
     }
+    if end_no is not None:
+        tag["end"] = end_no
+    if sig is not None:
+        tag["signature"] = sig
+    if scope is not None:
+        tag["scope"] = scope
+    if scope_kind is not None:
+        tag["scopeKind"] = scope_kind
+
+    return tag
 
 def parse_ctags_json(lines):
     """Parse ctags output (Universal JSON or classic) into structured records."""
@@ -222,17 +264,19 @@ def render_symbols(args):
     for path in sorted(by_file.keys()):
         syms = by_file[path]
         print(f"\n### `{path}`")
-        print("| Symbol | Kind | Line |")
-        print("|--------|------|------|")
+        print("| Symbol | Kind | Lines | Signature |")
+        print("|--------|------|-------|-----------|")
         for s in sorted(syms, key=lambda x: x.get("line", 0)):
             name = s.get("name", "?")
             kind = s.get("kind", "?")
             line = s.get("line", "?")
+            end = s.get("end", "")
+            sig = s.get("signature", "")
             scope_info = s.get("scope", "")
-            scope_name = s.get("scopeKind", "")
             if scope_info:
                 name = f"{scope_info}.{name}"
-            print(f"| `{name}` | {kind} | {line} |")
+            lines_str = f"{line}-{end}" if end else str(line)
+            print(f"| `{name}` | {kind} | {lines_str} | `{sig}` |" if sig else f"| `{name}` | {kind} | {lines_str} | |")
 
 
 # ── Outline Rendering ──────────────────────────────────────────────────────
@@ -260,6 +304,7 @@ def render_outline(args):
         line = sym.get("line", "?")
         scope = sym.get("scope", "")
         end_line = sym.get("end", "")
+        sig = sym.get("signature", "")
 
         # Indent based on scope depth
         indent = ""
@@ -271,7 +316,10 @@ def render_outline(args):
         if end_line:
             span = f"L{line}-{end_line}"
 
-        print(f"{indent}{kind}: {name} [{span}]")
+        if sig:
+            print(f"{indent}{kind}: {name}{sig} [{span}]")
+        else:
+            print(f"{indent}{kind}: {name} [{span}]")
     print("```")
 
 
@@ -326,13 +374,15 @@ def render_definition(args):
 
     print(f"## Definition: `{symbol}`")
     print("> Source locations where this symbol is defined. Request `rqs slice <file> <start> <end>` to see the implementation, or `rqs references <symbol>` for usage.")
-    print("| File | Kind | Line |")
-    print("|------|------|------|")
+    print("| File | Kind | Lines |")
+    print("|------|------|-------|")
     for s in symbols:
         path = s.get("path", "?")
         kind = s.get("kind", "?")
         line = s.get("line", "?")
-        print(f"| `{path}` | {kind} | {line} |")
+        end = s.get("end", "")
+        lines_str = f"{line}-{end}" if end else str(line)
+        print(f"| `{path}` | {kind} | {lines_str} |")
 
 
 # ── References Rendering ───────────────────────────────────────────────────
@@ -466,6 +516,7 @@ def render_summaries(args):
         file_count = entry.get("files", 0)
         types = entry.get("types", {})
         description = entry.get("description", "")
+        symbols = entry.get("symbols", [])
 
         print(f"\n### `{path}/`")
         if description:
@@ -477,6 +528,11 @@ def render_summaries(args):
             parts.append(f"{count} {ext}")
         if parts:
             print(f"*{', '.join(parts)}*")
+        if symbols:
+            sym_str = ", ".join(f"`{s}`" for s in symbols[:10])
+            if len(symbols) > 10:
+                sym_str += f", ... ({len(symbols)} total)"
+            print(sym_str)
 
 
 # ── Primer Rendering ───────────────────────────────────────────────────────
@@ -621,8 +677,76 @@ def _extract_signatures_from_body(body, source_lines, indent="", is_module=False
     return lines
 
 
+# Language detection for code fences
+_LANG_MAP = {
+    ".py": "python", ".js": "javascript", ".ts": "typescript",
+    ".jsx": "jsx", ".tsx": "tsx", ".sh": "bash", ".bash": "bash",
+    ".rb": "ruby", ".go": "go", ".rs": "rust", ".java": "java",
+    ".c": "c", ".h": "c", ".cpp": "cpp", ".cc": "cpp", ".hpp": "cpp",
+    ".css": "css", ".html": "html", ".json": "json", ".yaml": "yaml",
+    ".yml": "yaml", ".toml": "toml", ".xml": "xml", ".sql": "sql",
+    ".md": "markdown",
+}
+
+# Kinds that represent meaningful signatures
+_SIG_KINDS = {"class", "function", "method", "member", "struct", "interface",
+              "type", "enum", "prototype", "module"}
+
+
+def _format_ctags_signatures(symbols):
+    """Format ctags symbols as signature-style lines."""
+    symbols = [s for s in symbols if s.get("kind", "") in _SIG_KINDS]
+    symbols.sort(key=lambda s: s.get("line", 0))
+    if not symbols:
+        return []
+    lines = []
+    for s in symbols:
+        name = s.get("name", "?")
+        kind = s.get("kind", "?")
+        sig = s.get("signature", "")
+        line = s.get("line", "?")
+        end = s.get("end", "")
+        scope = s.get("scope", "")
+        indent = "    " if scope else ""
+        span = f"L{line}-{end}" if end else f"L{line}"
+        if sig:
+            lines.append(f"{indent}{kind}: {name}{sig} [{span}]")
+        else:
+            lines.append(f"{indent}{kind}: {name} [{span}]")
+    return lines
+
+
+def _run_ctags_on_file(repo_root, filepath):
+    """Run ctags on a single file and return parsed symbols."""
+    # Try JSON format first (Universal Ctags)
+    try:
+        result = subprocess.run(
+            ["ctags", "--output-format=json", "--fields=+nKSse", "-f", "-", filepath],
+            cwd=repo_root, capture_output=True, text=True, timeout=10
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return parse_ctags_json(result.stdout.strip().split("\n"))
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+    # Try classic format (Exuberant Ctags)
+    try:
+        result = subprocess.run(
+            ["ctags", "--fields=+nSe", "-f", "-", filepath],
+            cwd=repo_root, capture_output=True, text=True, timeout=10
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return parse_ctags_json(result.stdout.strip().split("\n"))
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+    return []
+
+
 def render_signatures(args):
-    """Render Python file signatures from file list on stdin."""
+    """Render file signatures from file list on stdin.
+
+    Python files: full AST analysis (signatures, decorators, docstrings, returns).
+    Other languages: ctags-based behavioral sketch (signatures, line spans).
+    """
     repo_root = os.environ.get("RQS_TARGET_REPO", ".")
 
     scope = None
@@ -636,12 +760,16 @@ def render_signatures(args):
 
     file_list = [line.strip() for line in sys.stdin if line.strip()]
     if not file_list:
-        print("*(no Python files found)*")
+        print("*(no files found)*")
         return
 
-    # Collect all file results first
+    py_files = [f for f in file_list if f.endswith(".py")]
+    other_files = [f for f in file_list if not f.endswith(".py")]
+
     results = []
-    for filepath in file_list:
+
+    # Python: AST analysis
+    for filepath in py_files:
         abs_path = os.path.join(repo_root, filepath)
         if not os.path.isfile(abs_path):
             continue
@@ -663,23 +791,1133 @@ def render_signatures(args):
         while sig_lines and not sig_lines[-1].strip():
             sig_lines.pop()
 
-        results.append((filepath, sig_lines))
+        ext = os.path.splitext(filepath)[1]
+        lang = _LANG_MAP.get(ext, "")
+        results.append((filepath, sig_lines, lang))
+
+    # Non-Python: ctags-based signatures
+    for filepath in other_files:
+        symbols = _run_ctags_on_file(repo_root, filepath)
+        if not symbols:
+            continue
+        sig_lines = _format_ctags_signatures(symbols)
+        if not sig_lines:
+            continue
+        ext = os.path.splitext(filepath)[1]
+        lang = _LANG_MAP.get(ext, "")
+        results.append((filepath, sig_lines, lang))
 
     if not results:
-        print("*(no Python files found)*")
+        print("*(no signatures found)*")
         return
 
     # Print top-level header with description once
     title = f"## Signatures: `{scope}`" if scope else "## Signatures"
     print(title)
-    print("> Behavioral sketch: class/function headers, decorators, first-line docstrings, and return statements. Implementation details omitted. Request `rqs slice <file> <start> <end>` to see full code.")
+    print("> Behavioral sketch: signatures, structure, and key details per file. Request `rqs slice <file> <start> <end>` to see full code.")
 
-    for filepath, sig_lines in results:
+    for filepath, sig_lines, lang in results:
         print(f"\n### `{filepath}`")
-        print("```python")
+        print(f"```{lang}")
         for line in sig_lines:
             print(line)
         print("```")
+
+
+# ── Show Rendering ─────────────────────────────────────────────────────────
+
+
+def render_show(args):
+    """Render full source of named symbols.
+
+    Reads ctags data from stdin, finds matching symbols,
+    reads source files directly, and renders each symbol's code.
+    """
+    repo_root = os.environ.get("RQS_TARGET_REPO", ".")
+
+    # All args are symbol names
+    symbol_names = args
+    if not symbol_names:
+        print("*(no symbols specified)*")
+        return
+
+    # Parse ctags from stdin
+    lines = sys.stdin.readlines()
+    all_tags = parse_ctags_json(lines)
+
+    for symbol in symbol_names:
+        # Find matching tags
+        matches = [t for t in all_tags if t.get("name") == symbol]
+
+        if not matches:
+            print(f"*(no definition found for `{symbol}`)*")
+            print()
+            continue
+
+        # Prefer match with end line; among those, prefer class/function over member
+        _kind_priority = {"class": 0, "struct": 0, "interface": 0, "enum": 0,
+                          "function": 1, "method": 2, "member": 3}
+        matches.sort(key=lambda t: (
+            0 if "end" in t else 1,
+            _kind_priority.get(t.get("kind", ""), 5),
+            t.get("line", 0),
+        ))
+        best = matches[0]
+
+        path = best.get("path", "")
+        start = best.get("line", 1)
+        end = best.get("end")
+        kind = best.get("kind", "?")
+        scope = best.get("scope", "")
+        display_name = f"{scope}.{symbol}" if scope else symbol
+
+        abs_path = os.path.join(repo_root, path)
+        if not os.path.isfile(abs_path):
+            print(f"*(file not found: {path})*")
+            print()
+            continue
+
+        try:
+            with open(abs_path) as f:
+                source_lines = f.readlines()
+        except (OSError, UnicodeDecodeError):
+            print(f"*(could not read: {path})*")
+            print()
+            continue
+
+        # If no end line, estimate from file length
+        if end is None:
+            end = len(source_lines)
+
+        # Extract source with line numbers
+        extracted = source_lines[start - 1:end]
+        if not extracted:
+            print(f"*(empty source for `{symbol}`)*")
+            print()
+            continue
+
+        ext = os.path.splitext(path)[1]
+        lang = _LANG_MAP.get(ext, "")
+
+        print(f"## Show: `{display_name}` ({kind} in `{path}`, lines {start}-{end})")
+        print(f"> Full source of `{display_name}`. Request `rqs references {symbol}` for usage, or `rqs show <other>` for related symbols.")
+        print(f"```{lang}")
+        width = len(str(end))
+        for i, line in enumerate(extracted, start=start):
+            print(f"{i:>{width}}: {line}", end="")
+        print("```")
+        print()
+
+
+# ── Context Rendering ──────────────────────────────────────────────────────
+
+
+def render_context(args):
+    """Render the enclosing symbol for a given file:line.
+
+    Reads ctags data from stdin, finds the innermost symbol
+    containing the target line, and renders its full source.
+    """
+    repo_root = os.environ.get("RQS_TARGET_REPO", ".")
+
+    filepath = args[0] if args else "?"
+    target_line = int(args[1]) if len(args) > 1 else 0
+
+    # Parse ctags from stdin
+    lines = sys.stdin.readlines()
+    all_tags = parse_ctags_json(lines)
+
+    # Filter to tags in this file that have end lines and contain the target line
+    containing = []
+    for t in all_tags:
+        if t.get("path") != filepath:
+            continue
+        start = t.get("line", 0)
+        end = t.get("end")
+        if end is None:
+            continue
+        if start <= target_line <= end:
+            containing.append(t)
+
+    if not containing:
+        # Fallback: find the nearest symbol starting before target_line
+        file_tags = [t for t in all_tags if t.get("path") == filepath]
+        before = [t for t in file_tags if t.get("line", 0) <= target_line]
+        if before:
+            before.sort(key=lambda t: t.get("line", 0), reverse=True)
+            best = before[0]
+            end = best.get("end")
+            if end is None:
+                # Estimate end from next symbol or EOF
+                after = [t for t in file_tags if t.get("line", 0) > best.get("line", 0)]
+                if after:
+                    after.sort(key=lambda t: t.get("line", 0))
+                    end = after[0].get("line", 0) - 1
+                else:
+                    abs_path = os.path.join(repo_root, filepath)
+                    try:
+                        with open(abs_path) as f:
+                            end = sum(1 for _ in f)
+                    except OSError:
+                        end = target_line
+            containing = [dict(best, end=end)]
+
+    if not containing:
+        print(f"*(no enclosing symbol found for `{filepath}:{target_line}`)*")
+        return
+
+    # Pick the innermost (smallest span) containing symbol
+    containing.sort(key=lambda t: (t.get("end", 0) - t.get("line", 0)))
+    best = containing[0]
+
+    name = best.get("name", "?")
+    kind = best.get("kind", "?")
+    start = best.get("line", 1)
+    end = best.get("end", start)
+    scope = best.get("scope", "")
+    display_name = f"{scope}.{name}" if scope else name
+
+    abs_path = os.path.join(repo_root, filepath)
+    try:
+        with open(abs_path) as f:
+            source_lines = f.readlines()
+    except (OSError, UnicodeDecodeError):
+        print(f"*(could not read: {filepath})*")
+        return
+
+    extracted = source_lines[start - 1:end]
+    if not extracted:
+        print(f"*(empty source)*")
+        return
+
+    ext = os.path.splitext(filepath)[1]
+    lang = _LANG_MAP.get(ext, "")
+
+    print(f"## Context: `{filepath}:{target_line}` \u2192 `{display_name}` ({kind}, lines {start}-{end})")
+    print(f"> Enclosing symbol for line {target_line}. Request `rqs show {name}` or `rqs slice {filepath} {start} {end}` for the same code by name or range.")
+    print(f"```{lang}")
+    width = len(str(end))
+    for i, line in enumerate(extracted, start=start):
+        print(f"{i:>{width}}: {line}", end="")
+    print("```")
+
+
+# ── Diff Rendering ─────────────────────────────────────────────────────────
+
+
+def render_diff(args):
+    """Render git diff output as structured markdown."""
+    ref = args[0] if args else None
+
+    content = sys.stdin.read()
+    if not content.strip():
+        if ref:
+            print(f"*(no differences against `{ref}`)*")
+        else:
+            print("*(no differences)*")
+        return
+
+    # Parse diff to count files and changes
+    files_changed = set()
+    additions = 0
+    deletions = 0
+    for line in content.split("\n"):
+        if line.startswith("diff --git"):
+            parts = line.split()
+            if len(parts) >= 4:
+                files_changed.add(parts[3].lstrip("b/"))
+        elif line.startswith("+") and not line.startswith("+++"):
+            additions += 1
+        elif line.startswith("-") and not line.startswith("---"):
+            deletions += 1
+
+    if ref:
+        print(f"## Diff: `{ref}`")
+    else:
+        print("## Diff")
+    stats = f"{len(files_changed)} files, +{additions}/-{deletions} lines"
+    print(f"> Git diff ({stats}). Request `rqs show <symbol>` or `rqs slice <file> <start> <end>` to see full context around changes.")
+    print("```diff")
+    print(content, end="")
+    print("```")
+
+
+# ── Files Rendering ────────────────────────────────────────────────────────
+
+
+def render_files(args):
+    """Render file list matching a glob pattern, with line counts."""
+    pattern = args[0] if args else "?"
+    repo_root = os.environ.get("RQS_TARGET_REPO", ".")
+
+    file_list = [line.strip() for line in sys.stdin if line.strip()]
+    if not file_list:
+        print(f"*(no files matching `{pattern}`)*")
+        return
+
+    # Compute line counts
+    line_counts = {}
+    for f in file_list:
+        path = os.path.join(repo_root, f)
+        try:
+            with open(path, "rb") as fh:
+                line_counts[f] = sum(1 for _ in fh)
+        except OSError:
+            pass
+
+    total_lines = sum(line_counts.values())
+    print(f"## Files: `{pattern}`")
+    print(f"> {len(file_list)} files matching pattern ({total_lines} total lines). Request `rqs show <symbol>` or `rqs slice <file> <start> <end>` to read code.")
+
+    for f in file_list:
+        lc = line_counts.get(f)
+        if lc is not None:
+            print(f"- `{f}` ({lc} lines)")
+        else:
+            print(f"- `{f}`")
+
+
+# ── Callees Rendering ──────────────────────────────────────────────────────
+
+
+def render_callees(args):
+    """Render what a function/method calls.
+
+    Reads ctags data from stdin. Finds the target symbol, reads its
+    source, extracts call names via AST (Python) or regex (other),
+    and cross-references against the symbol table.
+    """
+    symbol = args[0] if args else "?"
+    repo_root = os.environ.get("RQS_TARGET_REPO", ".")
+
+    # Parse all ctags from stdin
+    lines = sys.stdin.readlines()
+    all_tags = parse_ctags_json(lines)
+
+    # Find the target symbol
+    matches = [t for t in all_tags if t.get("name") == symbol]
+    if not matches:
+        print(f"*(no definition found for `{symbol}`)*")
+        return
+
+    # Prefer function/method with end line
+    _kind_priority = {"function": 0, "method": 1, "member": 2, "class": 3}
+    matches.sort(key=lambda t: (
+        0 if "end" in t else 1,
+        _kind_priority.get(t.get("kind", ""), 5),
+        t.get("line", 0),
+    ))
+    best = matches[0]
+
+    path = best.get("path", "")
+    start = best.get("line", 1)
+    end = best.get("end")
+    kind = best.get("kind", "?")
+
+    abs_path = os.path.join(repo_root, path)
+    if not os.path.isfile(abs_path):
+        print(f"*(file not found: {path})*")
+        return
+
+    try:
+        with open(abs_path) as f:
+            source_lines = f.readlines()
+    except (OSError, UnicodeDecodeError):
+        print(f"*(could not read: {path})*")
+        return
+
+    if end is None:
+        end = len(source_lines)
+
+    # Build symbol table for cross-referencing
+    known_symbols = {}
+    for t in all_tags:
+        name = t.get("name", "")
+        if name and name not in known_symbols:
+            known_symbols[name] = {
+                "path": t.get("path", ""),
+                "kind": t.get("kind", ""),
+                "line": t.get("line", 0),
+            }
+
+    # Extract calls
+    ext = os.path.splitext(path)[1]
+    if ext == ".py":
+        calls = _extract_python_calls(abs_path, source_lines, start, end, symbol)
+    else:
+        calls = _extract_regex_calls(source_lines, start, end, known_symbols, symbol)
+
+    if not calls:
+        print(f"*(no calls found in `{symbol}`)*")
+        return
+
+    # Cross-reference calls against symbol table
+    resolved = []
+    unresolved = []
+    for call_name in sorted(set(calls)):
+        if call_name in known_symbols:
+            info = known_symbols[call_name]
+            resolved.append((call_name, info["path"], info["kind"], info["line"]))
+        else:
+            unresolved.append(call_name)
+
+    scope = best.get("scope", "")
+    display_name = f"{scope}.{symbol}" if scope else symbol
+
+    print(f"## Callees: `{display_name}` ({kind} in `{path}`)")
+    print(f"> Functions and methods called by `{display_name}`. Request `rqs show <symbol>` to read any of them.")
+
+    if resolved:
+        print("\n| Called Symbol | File | Kind | Line |")
+        print("|--------------|------|------|------|")
+        for name, fpath, fkind, fline in resolved:
+            print(f"| `{name}` | `{fpath}` | {fkind} | {fline} |")
+
+    if unresolved:
+        print(f"\n**External/unresolved:** {', '.join(f'`{n}`' for n in unresolved)}")
+
+
+def _extract_python_calls(filepath, source_lines, start, end, symbol_name):
+    """Extract function/method call names from a Python function body using AST."""
+    source = "".join(source_lines)
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", SyntaxWarning)
+            tree = ast.parse(source, filename=filepath)
+    except SyntaxError:
+        return []
+
+    # Find the target function node
+    target_node = None
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            if node.name == symbol_name and node.lineno >= start and node.lineno <= end:
+                target_node = node
+                break
+
+    if target_node is None:
+        # Might be a class — look for __init__ or just walk the range
+        return _extract_range_calls(source_lines, start, end)
+
+    # Walk the function body and collect call names
+    calls = []
+    for node in ast.walk(target_node):
+        if isinstance(node, ast.Call):
+            name = _get_call_name(node)
+            if name and name != symbol_name:
+                calls.append(name)
+
+    return calls
+
+
+def _get_call_name(call_node):
+    """Extract the function name from an ast.Call node."""
+    func = call_node.func
+    if isinstance(func, ast.Name):
+        return func.id
+    elif isinstance(func, ast.Attribute):
+        return func.attr
+    return None
+
+
+def _extract_range_calls(source_lines, start, end):
+    """Fallback: extract call-like patterns from source lines via regex."""
+    calls = []
+    call_pattern = re.compile(r'\b([a-zA-Z_]\w*)\s*\(')
+    # Python keywords that look like calls but aren't
+    skip = {"if", "for", "while", "with", "return", "yield", "assert",
+            "raise", "print", "del", "not", "and", "or", "in", "is",
+            "class", "def", "lambda", "except", "finally", "try", "elif"}
+    for line in source_lines[start - 1:end]:
+        for m in call_pattern.finditer(line):
+            name = m.group(1)
+            if name not in skip:
+                calls.append(name)
+    return calls
+
+
+def _extract_regex_calls(source_lines, start, end, known_symbols, symbol_name):
+    """Extract call-like patterns and filter against known symbols."""
+    calls = []
+    call_pattern = re.compile(r'\b([a-zA-Z_]\w*)\s*\(')
+    for line in source_lines[start - 1:end]:
+        for m in call_pattern.finditer(line):
+            name = m.group(1)
+            if name != symbol_name and name in known_symbols:
+                calls.append(name)
+    return calls
+
+
+# ── Related Rendering ──────────────────────────────────────────────────────
+
+
+def render_related(args):
+    """Render files related to a given file (forward + reverse deps)."""
+    filepath = args[0] if args else "?"
+    repo_root = os.environ.get("RQS_TARGET_REPO", ".")
+
+    forward_files = []
+    reverse_files = []
+
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        if line.startswith("FORWARD:"):
+            content = line[len("FORWARD:"):]
+            if content:
+                forward_files = [f.strip() for f in content.split("\n") if f.strip()]
+        elif line.startswith("REVERSE:"):
+            content = line[len("REVERSE:"):]
+            if content:
+                reverse_files = [f.strip() for f in content.split("\n") if f.strip()]
+
+    # Compute line counts for referenced files
+    all_related = set(forward_files + reverse_files)
+    line_counts = {}
+    for f in all_related:
+        path = os.path.join(repo_root, f)
+        try:
+            with open(path, "rb") as fh:
+                line_counts[f] = sum(1 for _ in fh)
+        except OSError:
+            pass
+
+    print(f"## Related: `{filepath}`")
+    total = len(all_related)
+    print(f"> Neighborhood view: {len(forward_files)} imported by this file, {len(reverse_files)} files that reference it ({total} unique). Request `rqs deps <file>` for full import details.")
+
+    if forward_files:
+        print("\n**Imports (this file depends on):**")
+        for f in forward_files:
+            lc = line_counts.get(f)
+            if lc is not None:
+                print(f"- `{f}` ({lc} lines)")
+            else:
+                print(f"- `{f}`")
+
+    if reverse_files:
+        print("\n**Imported by (depends on this file):**")
+        for f in reverse_files:
+            lc = line_counts.get(f)
+            if lc is not None:
+                print(f"- `{f}` ({lc} lines)")
+            else:
+                print(f"- `{f}`")
+
+    if not forward_files and not reverse_files:
+        print("\n*(no related files found)*")
+
+
+# ── Notebook Rendering ──────────────────────────────────────────────────────
+
+
+def _truncate_text(text, max_lines):
+    """Truncate text to max_lines, returning (truncated_text, total_lines)."""
+    lines = text.split("\n")
+    # Strip trailing empty line from final newline
+    if lines and lines[-1] == "":
+        lines = lines[:-1]
+    total = len(lines)
+    if total <= max_lines:
+        return "\n".join(lines), total
+    truncated = "\n".join(lines[:max_lines])
+    return truncated, total
+
+
+def _render_notebook_outputs(outputs, max_lines, max_tb):
+    """Render cell outputs with truncation. Returns list of output strings."""
+    result = []
+
+    for out in outputs:
+        output_type = out.get("output_type", "")
+
+        if output_type in ("stream", "execute_result", "display_data"):
+            # Get text content
+            if output_type == "stream":
+                text = out.get("text", "")
+                if isinstance(text, list):
+                    text = "".join(text)
+            else:
+                # execute_result / display_data — check for rich types first
+                data = out.get("data", {})
+                rich_types = []
+                for mime in data:
+                    if mime.startswith("image/") or mime in ("text/html", "text/latex", "application/json"):
+                        rich_types.append(mime)
+
+                if rich_types and "text/plain" not in data:
+                    # Only rich outputs, no text fallback
+                    for mime in rich_types:
+                        result.append(f"[{mime} output]")
+                    continue
+
+                if rich_types:
+                    # Has both rich and text — show placeholders for rich, then text
+                    for mime in rich_types:
+                        result.append(f"[{mime} output]")
+
+                text = data.get("text/plain", "")
+                if isinstance(text, list):
+                    text = "".join(text)
+
+            text = text.rstrip("\n")
+            if not text:
+                continue
+
+            truncated, total = _truncate_text(text, max_lines)
+            if total > max_lines:
+                header = f"\u2192 {max_lines} lines of output (truncated from {total})"
+            else:
+                header = f"\u2192 {total} lines of output"
+
+            result.append(f"{header}\n```\n{truncated}\n```")
+
+        elif output_type == "error":
+            ename = out.get("ename", "Error")
+            evalue = out.get("evalue", "")
+            traceback_lines = out.get("traceback", [])
+
+            error_header = f"\u2192 **{ename}**: {evalue}"
+
+            if traceback_lines:
+                # Traceback lines may contain ANSI codes — strip them
+                clean_tb = []
+                for line in traceback_lines:
+                    # Strip ANSI escape sequences
+                    cleaned = re.sub(r'\x1b\[[0-9;]*m', '', str(line))
+                    clean_tb.append(cleaned)
+
+                total_frames = len(clean_tb)
+                if total_frames > max_tb:
+                    tb_display = clean_tb[-max_tb:]
+                    tb_text = "\n".join(tb_display)
+                    error_header += f" ({total_frames} frames, showing last {max_tb})"
+                else:
+                    tb_text = "\n".join(clean_tb)
+
+                result.append(f"{error_header}\n```\n{tb_text}\n```")
+            else:
+                result.append(error_header)
+
+    return result
+
+
+def render_notebook(args):
+    """Render a Jupyter notebook as structured markdown."""
+    filepath = args[0] if args else "?"
+    repo_root = os.environ.get("RQS_TARGET_REPO", ".")
+    max_output = int(os.environ.get("RQS_NOTEBOOK_MAX_OUTPUT_LINES", "10"))
+    max_tb = int(os.environ.get("RQS_NOTEBOOK_MAX_TRACEBACK", "5"))
+
+    abs_path = os.path.join(repo_root, filepath)
+    try:
+        with open(abs_path) as f:
+            nb = json.load(f)
+    except (OSError, json.JSONDecodeError) as e:
+        print(f"*(error reading notebook: {e})*")
+        return
+
+    cells = nb.get("cells", [])
+    metadata = nb.get("metadata", {})
+    kernel = metadata.get("kernelspec", {}).get("language", "")
+    kernel_name = metadata.get("kernelspec", {}).get("name", "")
+
+    # Count cell types
+    type_counts = {}
+    for cell in cells:
+        ct = cell.get("cell_type", "unknown")
+        type_counts[ct] = type_counts.get(ct, 0) + 1
+
+    count_parts = []
+    for ct in ("code", "markdown", "raw"):
+        if ct in type_counts:
+            count_parts.append(f"{type_counts[ct]} {ct}")
+
+    count_str = ", ".join(count_parts)
+    kernel_str = f", kernel: {kernel_name}" if kernel_name else ""
+
+    print(f"## Notebook: `{filepath}`")
+    print(f"> {len(cells)} cells ({count_str}){kernel_str}")
+
+    exec_count_idx = 0
+    for i, cell in enumerate(cells, 1):
+        cell_type = cell.get("cell_type", "unknown")
+        source = cell.get("source", "")
+        if isinstance(source, list):
+            source = "".join(source)
+
+        print(f"\n---\n*Cell {i} \u2014 {cell_type}", end="")
+
+        if cell_type == "code":
+            # Show execution count if available
+            exec_count = cell.get("execution_count")
+            if exec_count is not None:
+                print(f" [{exec_count}]", end="")
+            print(":*")
+
+            lang = kernel or "python"
+            print(f"```{lang}")
+            print(source, end="")
+            if source and not source.endswith("\n"):
+                print()
+            print("```")
+
+            # Render outputs
+            outputs = cell.get("outputs", [])
+            if outputs:
+                rendered = _render_notebook_outputs(outputs, max_output, max_tb)
+                for block in rendered:
+                    print(block)
+
+        elif cell_type == "markdown":
+            print(":*")
+            print()
+            print(source, end="")
+            if source and not source.endswith("\n"):
+                print()
+
+        elif cell_type == "raw":
+            print(":*")
+            print()
+            print(source, end="")
+            if source and not source.endswith("\n"):
+                print()
+
+        else:
+            print(":*")
+            print()
+            print(source, end="")
+            if source and not source.endswith("\n"):
+                print()
+
+
+# ── Notebook Debug Rendering ─────────────────────────────────────────────────
+
+
+_FRAME_RE_STANDARD = re.compile(
+    r'File "([^"]+)", line (\d+)(?:, in (.+))?'
+)
+# IPython file frame: File path:line, in func(args)  (no quotes around path)
+_FRAME_RE_IPYTHON_FILE = re.compile(
+    r'File (\S+?):(\d+)(?:,\s*in\s+(\S+))?'
+)
+_FRAME_RE_IPYTHON = re.compile(
+    r'(?:Cell |Input )\s*(?:In\s*\[?\s*(\d+)\]?),?\s*line\s*(\d+)'
+)
+_FRAME_RE_IPYTHON_FUNC = re.compile(
+    r'(?:Cell |Input )\s*(?:In\s*\[?\s*(\d+)\]?),?\s*in\s+(\S+)'
+)
+
+
+def _parse_traceback_frames(traceback_lines):
+    """Parse traceback lines into structured frame dicts.
+
+    Returns list of {type, path, line, function} where type is initially None
+    (to be classified later).
+    """
+    frames = []
+    for raw_line in traceback_lines:
+        # Strip ANSI codes
+        line = re.sub(r'\x1b\[[0-9;]*m', '', str(raw_line))
+
+        # Try standard Python frame: File "path", line N, in func
+        m = _FRAME_RE_STANDARD.search(line)
+        if m:
+            frames.append({
+                "path": m.group(1),
+                "line": int(m.group(2)),
+                "function": m.group(3) or "",
+                "type": None,
+            })
+            continue
+
+        # Try IPython file frame: File path:line, in func (no quotes)
+        m = _FRAME_RE_IPYTHON_FILE.search(line)
+        if m:
+            func = m.group(3) or ""
+            # Strip trailing parens from func name like "validate_input(value)"
+            if "(" in func:
+                func = func[:func.index("(")]
+            frames.append({
+                "path": m.group(1),
+                "line": int(m.group(2)),
+                "function": func,
+                "type": None,
+            })
+            continue
+
+        # Try IPython cell frame with function name
+        m = _FRAME_RE_IPYTHON_FUNC.search(line)
+        if m:
+            frames.append({
+                "path": f"Cell In[{m.group(1)}]",
+                "line": 0,
+                "function": m.group(2),
+                "type": "notebook",
+            })
+            continue
+
+        # Try IPython cell frame (line reference)
+        m = _FRAME_RE_IPYTHON.search(line)
+        if m:
+            frames.append({
+                "path": f"Cell In[{m.group(1)}]",
+                "line": int(m.group(2)),
+                "function": "",
+                "type": "notebook",
+            })
+            continue
+
+    return frames
+
+
+def _classify_frame(frame, repo_root, tracked_files):
+    """Classify a frame as notebook, repo, or external."""
+    if frame["type"] == "notebook":
+        return frame
+
+    path = frame["path"]
+
+    # Check if path is relative and in tracked files
+    if path in tracked_files:
+        frame["type"] = "repo"
+        return frame
+
+    # Check if absolute path resolves into repo
+    if os.path.isabs(path):
+        try:
+            rel = os.path.relpath(path, repo_root)
+            if not rel.startswith("..") and rel in tracked_files:
+                frame["path"] = rel
+                frame["type"] = "repo"
+                return frame
+        except ValueError:
+            pass
+
+    frame["type"] = "external"
+    return frame
+
+
+def _render_repo_frame_details(repo_frames, repo_root, all_tags):
+    """Render enclosing function source for repo-local frames with >>> marker."""
+    lines = []
+
+    for frame in repo_frames:
+        path = frame["path"]
+        target_line = frame["line"]
+        func_name = frame.get("function", "")
+
+        abs_path = os.path.join(repo_root, path)
+        if not os.path.isfile(abs_path):
+            continue
+
+        try:
+            with open(abs_path) as f:
+                source_lines = f.readlines()
+        except (OSError, UnicodeDecodeError):
+            continue
+
+        # Find enclosing function from ctags
+        containing = []
+        for t in all_tags:
+            if t.get("path") != path:
+                continue
+            start = t.get("line", 0)
+            end = t.get("end")
+            if end is None:
+                continue
+            if start <= target_line <= end:
+                containing.append(t)
+
+        if not containing:
+            # Fallback: show a few lines around the error
+            start = max(1, target_line - 2)
+            end = min(len(source_lines), target_line + 2)
+            sym_name = func_name or f"line {target_line}"
+            lines.append(f"\n**`{path}:{target_line}`** (`{sym_name}`):")
+            ext = os.path.splitext(path)[1]
+            lang = _LANG_MAP.get(ext, "")
+            lines.append(f"```{lang}")
+            width = len(str(end))
+            for i in range(start, end + 1):
+                prefix = ">>>" if i == target_line else "   "
+                lines.append(f"{prefix} {i:>{width}}: {source_lines[i - 1].rstrip()}")
+            lines.append("```")
+            continue
+
+        # Pick innermost (smallest span) containing symbol
+        containing.sort(key=lambda t: (t.get("end", 0) - t.get("line", 0)))
+        best = containing[0]
+
+        sym_name = best.get("name", func_name or "?")
+        kind = best.get("kind", "?")
+        start = best.get("line", 1)
+        end = best.get("end", start)
+        scope = best.get("scope", "")
+        display_name = f"{scope}.{sym_name}" if scope else sym_name
+
+        lines.append(f"\n**`{path}:{target_line}`** \u2192 `{display_name}` ({kind}, lines {start}-{end}):")
+
+        ext = os.path.splitext(path)[1]
+        lang = _LANG_MAP.get(ext, "")
+        lines.append(f"```{lang}")
+        width = len(str(end))
+        for i in range(start, end + 1):
+            prefix = ">>>" if i == target_line else "   "
+            lines.append(f"{prefix} {i:>{width}}: {source_lines[i - 1].rstrip()}")
+        lines.append("```")
+
+        # Extract callees for context
+        if ext == ".py":
+            callees = _extract_python_calls(abs_path, source_lines, start, end, sym_name)
+            if callees:
+                unique_calls = sorted(set(callees))
+                lines.append(f"Calls: {', '.join(f'`{c}`' for c in unique_calls)}")
+
+    return lines
+
+
+def _is_internal_module(module_name, rel_path, tracked_files):
+    """Check if a module name maps to a tracked file in the repo."""
+    # Convert dotted module to path candidates
+    parts = module_name.split(".")
+    candidates = [
+        "/".join(parts) + ".py",
+        "/".join(parts) + "/__init__.py",
+    ]
+    # Also try relative to the file's directory
+    if rel_path:
+        dir_path = os.path.dirname(rel_path)
+        if dir_path:
+            candidates.append(dir_path + "/" + "/".join(parts) + ".py")
+            candidates.append(dir_path + "/" + "/".join(parts) + "/__init__.py")
+
+    for candidate in candidates:
+        if candidate in tracked_files:
+            return True
+    return False
+
+
+def _render_dependency_trace(repo_frames, repo_root, tracked_files):
+    """Render import analysis for files involved in the traceback."""
+    lines = []
+    seen_files = set()
+
+    for frame in repo_frames:
+        path = frame["path"]
+        if path in seen_files:
+            continue
+        seen_files.add(path)
+
+        abs_path = os.path.join(repo_root, path)
+        if not os.path.isfile(abs_path) or not path.endswith(".py"):
+            continue
+
+        try:
+            with open(abs_path) as f:
+                source = f.read()
+        except (OSError, UnicodeDecodeError):
+            continue
+
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", SyntaxWarning)
+                tree = ast.parse(source, filename=path)
+        except SyntaxError:
+            continue
+
+        internal = []
+        external = []
+
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    mod = alias.name
+                    if _is_internal_module(mod, path, tracked_files):
+                        internal.append(mod)
+                    else:
+                        external.append(mod)
+            elif isinstance(node, ast.ImportFrom):
+                mod = node.module or ""
+                if mod and _is_internal_module(mod, path, tracked_files):
+                    internal.append(mod)
+                elif mod:
+                    external.append(mod)
+
+        if internal or external:
+            lines.append(f"\n**`{path}`**:")
+            if internal:
+                lines.append(f"- Internal: {', '.join(f'`{m}`' for m in sorted(set(internal)))}")
+            if external:
+                lines.append(f"- External: {', '.join(f'`{m}`' for m in sorted(set(external)))}")
+
+    return lines
+
+
+def _render_diagnostic_summary(cell_index, ename, evalue, frames, repo_frames, filepath):
+    """Render bullet-point diagnostic summary with suggested commands."""
+    lines = []
+
+    notebook_frames = [f for f in frames if f["type"] == "notebook"]
+    external_frames = [f for f in frames if f["type"] == "external"]
+
+    lines.append(f"- **Error**: `{ename}: {evalue}`")
+    lines.append(f"- **Cell**: {cell_index}")
+    lines.append(f"- **Frames**: {len(frames)} total ({len(notebook_frames)} notebook, {len(repo_frames)} repo, {len(external_frames)} external)")
+
+    if repo_frames:
+        paths = sorted(set(f["path"] for f in repo_frames))
+        lines.append(f"- **Repo files involved**: {', '.join(f'`{p}`' for p in paths)}")
+
+    lines.append("")
+    lines.append("**Suggested commands:**")
+    for f in repo_frames:
+        lines.append(f"- `rqs context {f['path']} {f['line']}` \u2014 enclosing function at error site")
+    if repo_frames:
+        paths = sorted(set(f["path"] for f in repo_frames))
+        for p in paths:
+            lines.append(f"- `rqs deps {p}` \u2014 dependency analysis")
+        funcs = [f["function"] for f in repo_frames if f.get("function")]
+        for fn in sorted(set(funcs)):
+            lines.append(f"- `rqs callees {fn}` \u2014 what `{fn}` calls")
+
+    return lines
+
+
+def _render_debug_error(cell_index, cell, repo_root, tracked_files, all_tags, filepath):
+    """Render all debug sections for one error cell."""
+    lines = []
+    source = cell.get("source", "")
+    if isinstance(source, list):
+        source = "".join(source)
+
+    for out in cell.get("outputs", []):
+        if out.get("output_type") != "error":
+            continue
+
+        ename = out.get("ename", "Error")
+        evalue = out.get("evalue", "")
+        traceback_raw = out.get("traceback", [])
+
+        # ── 1. Error Summary ──
+        lines.append(f"### Error: `{ename}: {evalue}`")
+        lines.append(f"*Cell {cell_index}:*")
+        lines.append("```python")
+        lines.append(source.rstrip())
+        lines.append("```")
+
+        # ── 2. Traceback Frames ──
+        frames = _parse_traceback_frames(traceback_raw)
+        for f in frames:
+            _classify_frame(f, repo_root, tracked_files)
+
+        if frames:
+            lines.append("\n**Traceback Frames:**")
+            lines.append("| # | Location | Line | Function | Type |")
+            lines.append("|---|----------|------|----------|------|")
+            for i, f in enumerate(frames, 1):
+                ftype = f["type"]
+                label = {"notebook": "notebook-local", "repo": "repo-local", "external": "external"}.get(ftype, ftype)
+                lines.append(f"| {i} | `{f['path']}` | {f['line']} | `{f['function']}`  | {label} |")
+
+        # ── 3. Repo Code in Traceback ──
+        repo_frames = [f for f in frames if f["type"] == "repo"]
+        if repo_frames and all_tags is not None:
+            lines.append("\n**Repo Code in Traceback:**")
+            lines.extend(_render_repo_frame_details(repo_frames, repo_root, all_tags))
+
+        # ── 4. Dependency Trace ──
+        if repo_frames:
+            dep_lines = _render_dependency_trace(repo_frames, repo_root, tracked_files)
+            lines.append("\n**Dependency Trace:**")
+            if dep_lines:
+                lines.extend(dep_lines)
+            else:
+                lines.append("*(no imports in traced files)*")
+
+        # ── 5. Diagnostic Summary ──
+        lines.append("\n**Diagnostic Summary:**")
+        lines.extend(_render_diagnostic_summary(cell_index, ename, evalue, frames, repo_frames, filepath))
+
+    return lines
+
+
+def _render_notebook_debug_no_errors(cells, filepath):
+    """Render 'no errors found' summary."""
+    code_cells = [c for c in cells if c.get("cell_type") == "code"]
+    executed = [c for c in code_cells if c.get("execution_count") is not None]
+    print(f"## Notebook Debug: `{filepath}`")
+    print(f"> No errors found. {len(code_cells)} code cells ({len(executed)} executed).")
+
+
+def render_notebook_debug(args):
+    """Render notebook error analysis with traceback cross-referencing."""
+    filepath = args[0] if args else "?"
+    repo_root = os.environ.get("RQS_TARGET_REPO", ".")
+
+    abs_path = os.path.join(repo_root, filepath)
+    try:
+        with open(abs_path) as f:
+            nb = json.load(f)
+    except (OSError, json.JSONDecodeError) as e:
+        print(f"*(error reading notebook: {e})*")
+        return
+
+    cells = nb.get("cells", [])
+
+    # Find error cells
+    error_cells = []
+    for i, cell in enumerate(cells, 1):
+        if cell.get("cell_type") != "code":
+            continue
+        for out in cell.get("outputs", []):
+            if out.get("output_type") == "error":
+                error_cells.append((i, cell))
+                break
+
+    if not error_cells:
+        _render_notebook_debug_no_errors(cells, filepath)
+        return
+
+    # Load ctags cache if available
+    all_tags = None
+    ctags_cache = os.environ.get("RQS_CTAGS_CACHE", "")
+    if ctags_cache and os.path.isfile(ctags_cache):
+        try:
+            with open(ctags_cache) as f:
+                all_tags = parse_ctags_json(f.readlines())
+        except OSError:
+            pass
+
+    # Get tracked files
+    tracked_files = set()
+    try:
+        result = subprocess.run(
+            ["git", "ls-files"],
+            cwd=repo_root, capture_output=True, text=True, timeout=10
+        )
+        if result.returncode == 0:
+            tracked_files = set(line.strip() for line in result.stdout.split("\n") if line.strip())
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+
+    # Render header
+    error_count = len(error_cells)
+    error_names = [out.get("ename", "Error")
+                   for _, cell in error_cells
+                   for out in cell.get("outputs", [])
+                   if out.get("output_type") == "error"]
+    print(f"## Notebook Debug: `{filepath}`")
+    print(f"> {error_count} errors found: {', '.join(error_names)}")
+
+    # Render each error
+    for cell_index, cell in error_cells:
+        output_lines = _render_debug_error(
+            cell_index, cell, repo_root, tracked_files, all_tags, filepath
+        )
+        print()
+        print("\n".join(output_lines))
 
 
 # ── Dispatch ────────────────────────────────────────────────────────────────
@@ -697,6 +1935,14 @@ MODES = {
     "summaries": render_summaries,
     "primer": render_primer,
     "signatures": render_signatures,
+    "show": render_show,
+    "context": render_context,
+    "diff": render_diff,
+    "files": render_files,
+    "callees": render_callees,
+    "related": render_related,
+    "notebook": render_notebook,
+    "notebook-debug": render_notebook_debug,
 }
 
 

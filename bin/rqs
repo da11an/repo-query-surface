@@ -52,12 +52,19 @@ Commands:
   outline <file>                 Structural outline of a single file
   signatures [file|dir]          Behavioral sketch (signatures, returns, docstrings)
   slice <file> <start> <end>     Extract code slice with line numbers
+  show <symbol> [symbol...]      Extract full source of named symbols
+  context <file> <line>          Show enclosing function/class for a line
   definition <symbol>            Find where a symbol is defined
   references <symbol>            Find call sites / usage
   deps <file>                    Show imports (internal vs external)
   grep <pattern> [--scope dir]   Structured regex search
+  diff [ref] [--staged]          Structured git diff output
+  files <glob>                   List files matching a pattern
+  callees <symbol>               Show what a function calls
+  related <file>                 Show files connected to a file
   primer [--light|--medium|--heavy] [--task TASK]
                                  Generate tiered static primer
+  notebook <file> [--debug]      Extract structured content from .ipynb
   prompt [task]                  LLM-facing orientation and task framing
 
 Global options:
@@ -115,6 +122,14 @@ case "$COMMAND" in
         source "$RQS_LIB_DIR/rqs_slice.sh"
         cmd_slice "$@"
         ;;
+    show)
+        source "$RQS_LIB_DIR/rqs_show.sh"
+        cmd_show "$@"
+        ;;
+    context)
+        source "$RQS_LIB_DIR/rqs_context.sh"
+        cmd_context "$@"
+        ;;
     definition)
         source "$RQS_LIB_DIR/rqs_definition.sh"
         cmd_definition "$@"
@@ -131,9 +146,29 @@ case "$COMMAND" in
         source "$RQS_LIB_DIR/rqs_grep.sh"
         cmd_grep "$@"
         ;;
+    diff)
+        source "$RQS_LIB_DIR/rqs_diff.sh"
+        cmd_diff "$@"
+        ;;
+    files)
+        source "$RQS_LIB_DIR/rqs_files.sh"
+        cmd_files "$@"
+        ;;
+    callees)
+        source "$RQS_LIB_DIR/rqs_callees.sh"
+        cmd_callees "$@"
+        ;;
+    related)
+        source "$RQS_LIB_DIR/rqs_related.sh"
+        cmd_related "$@"
+        ;;
     primer)
         source "$RQS_LIB_DIR/rqs_primer.sh"
         cmd_primer "$@"
+        ;;
+    notebook)
+        source "$RQS_LIB_DIR/rqs_notebook.sh"
+        cmd_notebook "$@"
         ;;
     prompt)
         source "$RQS_LIB_DIR/rqs_prompt.sh"

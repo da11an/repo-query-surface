@@ -33,7 +33,7 @@ assert_contains() {
     local output="$2"
     local expected="$3"
 
-    if echo "$output" | grep -qF "$expected"; then
+    if echo "$output" | grep -qF -- "$expected"; then
         PASS=$((PASS + 1))
         echo "  PASS: $test_name"
     else
@@ -48,7 +48,7 @@ assert_not_contains() {
     local output="$2"
     local unexpected="$3"
 
-    if ! echo "$output" | grep -qF "$unexpected"; then
+    if ! echo "$output" | grep -qF -- "$unexpected"; then
         PASS=$((PASS + 1))
         echo "  PASS: $test_name"
     else
@@ -88,6 +88,7 @@ test_tree() {
     assert_contains "tree shows lib dir" "$output" "lib/"
     assert_contains "tree shows docs dir" "$output" "docs/"
     assert_contains "tree shows main.py" "$output" "main.py"
+    assert_contains "tree shows line counts" "$output" "main.py (34)"
     assert_not_contains "tree excludes .git" "$output" ".git"
 
     # Test with depth
@@ -112,6 +113,11 @@ test_symbols() {
     assert_contains "symbols shows main function" "$output" "main"
     assert_contains "symbols header" "$output" "## Symbols"
     assert_contains "symbols has description" "$output" "Symbol index extracted via ctags"
+    assert_contains "symbols has Lines column" "$output" "| Lines |"
+    assert_contains "symbols has Signature column" "$output" "| Signature |"
+    assert_contains "symbols shows line span" "$output" "8-24"
+    assert_contains "symbols shows member" "$output" "Application.__init__"
+    assert_contains "symbols shows signature" "$output" "(self, name)"
 }
 
 # ── Test: Outline ───────────────────────────────────────────────────────────
@@ -126,6 +132,8 @@ test_outline() {
     assert_contains "outline shows Application" "$output" "Application"
     assert_contains "outline shows start method" "$output" "start"
     assert_contains "outline shows stop method" "$output" "stop"
+    assert_contains "outline shows signature" "$output" "__init__(self, name)"
+    assert_contains "outline shows main signature" "$output" "main()"
 }
 
 # ── Test: Slice ─────────────────────────────────────────────────────────────
@@ -157,6 +165,8 @@ test_definition() {
     assert_contains "definition finds class" "$output" "src/main.py"
     assert_contains "definition header" "$output" "## Definition"
     assert_contains "definition has description" "$output" "Source locations where this symbol is defined"
+    assert_contains "definition has Lines column" "$output" "| Lines |"
+    assert_contains "definition shows line span" "$output" "8-24"
 }
 
 # ── Test: References ───────────────────────────────────────────────────────
@@ -182,6 +192,7 @@ test_deps() {
     assert_contains "deps has description" "$output" "Import analysis"
     assert_contains "deps shows external os" "$output" "os"
     assert_contains "deps shows external sys" "$output" "sys"
+    assert_contains "deps shows imported names" "$output" "format_output, validate_input"
 }
 
 # ── Test: Grep ──────────────────────────────────────────────────────────────
@@ -215,6 +226,7 @@ test_primer() {
     assert_contains "primer has tree" "$output" "## Tree"
     assert_contains "primer has symbols" "$output" "## Symbols"
     assert_contains "primer has module summaries" "$output" "## Module Summaries"
+    assert_contains "primer summaries have symbols" "$output" "Application"
     assert_not_contains "primer default has no task" "$output" "## Task:"
     assert_not_contains "primer default no signatures" "$output" "## Signatures"
     assert_not_contains "primer default no deps" "$output" "## Internal Dependencies"
@@ -259,6 +271,13 @@ test_help() {
     assert_contains "help lists symbols" "$output" "symbols"
     assert_contains "help lists primer" "$output" "primer"
     assert_contains "help lists prompt" "$output" "prompt"
+    assert_contains "help lists show" "$output" "show"
+    assert_contains "help lists context" "$output" "context"
+    assert_contains "help lists diff" "$output" "diff"
+    assert_contains "help lists files" "$output" "files"
+    assert_contains "help lists callees" "$output" "callees"
+    assert_contains "help lists related" "$output" "related"
+    assert_contains "help lists notebook" "$output" "notebook"
 
     # Subcommand help
     output=$("$RQS" --repo "$FIXTURE_DIR" tree --help)
@@ -326,9 +345,307 @@ test_signatures() {
     assert_contains "signatures dir has helpers.py" "$output" '### `src/utils/helpers.py`'
     assert_contains "signatures dir has format_output" "$output" "def format_output"
 
+    # Whole repo — includes non-Python via ctags
+    output=$("$RQS" --repo "$FIXTURE_DIR" signatures 2>&1)
+    assert_contains "signatures whole repo has python" "$output" '### `src/main.py`'
+    assert_contains "signatures whole repo has shell" "$output" '### `lib/config.sh`'
+    assert_contains "signatures shell shows function" "$output" "load_config"
+
     # Help
     output=$("$RQS" --repo "$FIXTURE_DIR" signatures --help 2>&1)
     assert_contains "signatures help" "$output" "Usage: rqs signatures"
+}
+
+# ── Test: Show ─────────────────────────────────────────────────────────────
+
+test_show() {
+    echo "Testing: show"
+
+    local output
+    output=$("$RQS" --repo "$FIXTURE_DIR" show Application 2>&1)
+    assert_contains "show header" "$output" "## Show:"
+    assert_contains "show has class name" "$output" "Application"
+    assert_contains "show has file path" "$output" "src/main.py"
+    assert_contains "show has kind" "$output" "class"
+    assert_contains "show has line range" "$output" "lines 8-24"
+    assert_contains "show has class body" "$output" "def start(self):"
+    assert_contains "show has python fence" "$output" '```python'
+
+    # Multiple symbols
+    output=$("$RQS" --repo "$FIXTURE_DIR" show Application format_output 2>&1)
+    assert_contains "show multi has Application" "$output" "## Show: \`Application\`"
+    assert_contains "show multi has format_output" "$output" "## Show: \`format_output\`"
+    assert_contains "show multi format_output body" "$output" "[OUTPUT]"
+
+    # Nonexistent symbol
+    output=$("$RQS" --repo "$FIXTURE_DIR" show NonexistentSymbol12345 2>&1)
+    assert_contains "show missing symbol" "$output" "no definition found"
+
+    # Help
+    output=$("$RQS" --repo "$FIXTURE_DIR" show --help 2>&1)
+    assert_contains "show help" "$output" "Usage: rqs show"
+
+    # Error: no args
+    assert_exit_code "show no args" 1 "$RQS" --repo "$FIXTURE_DIR" show
+}
+
+# ── Test: Context ──────────────────────────────────────────────────────────
+
+test_context() {
+    echo "Testing: context"
+
+    local output
+    # Line 17 is inside Application.start()
+    output=$("$RQS" --repo "$FIXTURE_DIR" context src/main.py 17 2>&1)
+    assert_contains "context header" "$output" "## Context:"
+    assert_contains "context shows enclosing symbol" "$output" "start"
+    assert_contains "context shows file:line" "$output" "src/main.py:17"
+    assert_contains "context has code" "$output" "validate_input"
+    assert_contains "context has python fence" "$output" '```python'
+
+    # Line 12 is inside Application.__init__
+    output=$("$RQS" --repo "$FIXTURE_DIR" context src/main.py 12 2>&1)
+    assert_contains "context __init__ enclosing" "$output" "__init__"
+    assert_contains "context __init__ body" "$output" "self.name = name"
+
+    # Line 9 is inside Application class (docstring line)
+    output=$("$RQS" --repo "$FIXTURE_DIR" context src/main.py 9 2>&1)
+    assert_contains "context class level" "$output" "Application"
+
+    # Help
+    output=$("$RQS" --repo "$FIXTURE_DIR" context --help 2>&1)
+    assert_contains "context help" "$output" "Usage: rqs context"
+
+    # Error: missing args
+    assert_exit_code "context no args" 1 "$RQS" --repo "$FIXTURE_DIR" context
+    assert_exit_code "context missing line" 1 "$RQS" --repo "$FIXTURE_DIR" context src/main.py
+}
+
+# ── Test: Diff ─────────────────────────────────────────────────────────────
+
+test_diff() {
+    echo "Testing: diff"
+
+    # Fixture repo should be clean — no changes
+    local output
+    output=$("$RQS" --repo "$FIXTURE_DIR" diff 2>&1)
+    assert_contains "diff no changes" "$output" "no differences"
+
+    # Diff against HEAD (also no changes)
+    output=$("$RQS" --repo "$FIXTURE_DIR" diff HEAD 2>&1)
+    assert_contains "diff HEAD no changes" "$output" "no differences"
+
+    # Create a change, test diff, then revert
+    echo "# temporary" >> "$FIXTURE_DIR/src/main.py"
+    output=$("$RQS" --repo "$FIXTURE_DIR" diff 2>&1)
+    assert_contains "diff header" "$output" "## Diff"
+    assert_contains "diff has code fence" "$output" '```diff'
+    assert_contains "diff shows change" "$output" "temporary"
+    assert_contains "diff has stats" "$output" "files"
+    # Revert
+    (cd "$FIXTURE_DIR" && git checkout -- src/main.py)
+
+    # Help
+    output=$("$RQS" --repo "$FIXTURE_DIR" diff --help 2>&1)
+    assert_contains "diff help" "$output" "Usage: rqs diff"
+}
+
+# ── Test: Files ────────────────────────────────────────────────────────────
+
+test_files() {
+    echo "Testing: files"
+
+    local output
+    output=$("$RQS" --repo "$FIXTURE_DIR" files "*.py" 2>&1)
+    assert_contains "files header" "$output" "## Files:"
+    assert_contains "files shows pattern" "$output" '`*.py`'
+    assert_contains "files shows main.py" "$output" "src/main.py"
+    assert_contains "files shows helpers.py" "$output" "src/utils/helpers.py"
+    assert_contains "files has line counts" "$output" "lines"
+    assert_contains "files has file count" "$output" "3 files"
+
+    # Glob for shell files
+    output=$("$RQS" --repo "$FIXTURE_DIR" files "*.sh" 2>&1)
+    assert_contains "files sh shows config" "$output" "lib/config.sh"
+
+    # No matches
+    output=$("$RQS" --repo "$FIXTURE_DIR" files "*.xyz" 2>&1)
+    assert_contains "files no matches" "$output" "no files matching"
+
+    # Help
+    output=$("$RQS" --repo "$FIXTURE_DIR" files --help 2>&1)
+    assert_contains "files help" "$output" "Usage: rqs files"
+
+    # Error: no args
+    assert_exit_code "files no args" 1 "$RQS" --repo "$FIXTURE_DIR" files
+}
+
+# ── Test: Callees ──────────────────────────────────────────────────────────
+
+test_callees() {
+    echo "Testing: callees"
+
+    local output
+    # start() calls validate_input and format_output
+    output=$("$RQS" --repo "$FIXTURE_DIR" callees start 2>&1)
+    assert_contains "callees header" "$output" "## Callees:"
+    assert_contains "callees shows start" "$output" "start"
+    assert_contains "callees finds validate_input" "$output" "validate_input"
+    assert_contains "callees finds format_output" "$output" "format_output"
+    assert_contains "callees has table" "$output" "| Called Symbol |"
+
+    # main() calls Application and start
+    output=$("$RQS" --repo "$FIXTURE_DIR" callees main 2>&1)
+    assert_contains "callees main finds Application" "$output" "Application"
+    assert_contains "callees main finds start" "$output" "start"
+
+    # Nonexistent symbol
+    output=$("$RQS" --repo "$FIXTURE_DIR" callees NonexistentFunc123 2>&1)
+    assert_contains "callees missing symbol" "$output" "no definition found"
+
+    # Help
+    output=$("$RQS" --repo "$FIXTURE_DIR" callees --help 2>&1)
+    assert_contains "callees help" "$output" "Usage: rqs callees"
+
+    # Error: no args
+    assert_exit_code "callees no args" 1 "$RQS" --repo "$FIXTURE_DIR" callees
+}
+
+# ── Test: Related ──────────────────────────────────────────────────────────
+
+test_related() {
+    echo "Testing: related"
+
+    local output
+    # main.py imports helpers.py
+    output=$("$RQS" --repo "$FIXTURE_DIR" related src/main.py 2>&1)
+    assert_contains "related header" "$output" "## Related:"
+    assert_contains "related shows forward dep" "$output" "src/utils/helpers.py"
+    assert_contains "related has imports section" "$output" "Imports"
+
+    # helpers.py is imported by main.py
+    output=$("$RQS" --repo "$FIXTURE_DIR" related src/utils/helpers.py 2>&1)
+    assert_contains "related reverse dep" "$output" "src/main.py"
+    assert_contains "related has imported by section" "$output" "Imported by"
+    assert_contains "related has line counts" "$output" "lines"
+
+    # Help
+    output=$("$RQS" --repo "$FIXTURE_DIR" related --help 2>&1)
+    assert_contains "related help" "$output" "Usage: rqs related"
+
+    # Error: no args
+    assert_exit_code "related no args" 1 "$RQS" --repo "$FIXTURE_DIR" related
+    assert_exit_code "related nonexistent" 1 "$RQS" --repo "$FIXTURE_DIR" related nonexistent.py
+}
+
+# ── Test: Notebook ──────────────────────────────────────────────────────────
+
+test_notebook() {
+    echo "Testing: notebook"
+
+    local output
+    output=$("$RQS" --repo "$FIXTURE_DIR" notebook notebooks/analysis.ipynb 2>&1)
+
+    # Header
+    assert_contains "notebook header" "$output" "## Notebook:"
+    assert_contains "notebook filename" "$output" "analysis.ipynb"
+    assert_contains "notebook cell count" "$output" "6 cells"
+    assert_contains "notebook kernel" "$output" "python3"
+
+    # Markdown cell
+    assert_contains "notebook markdown cell" "$output" "Cell 1"
+    assert_contains "notebook markdown content" "$output" "Sample Analysis"
+    assert_contains "notebook markdown body" "$output" "data processing"
+
+    # Code cell with output
+    assert_contains "notebook code cell" "$output" "Cell 2"
+    assert_contains "notebook code fence" "$output" '```python'
+    assert_contains "notebook code source" "$output" "import pandas"
+    assert_contains "notebook output truncated" "$output" "truncated from 14"
+    assert_contains "notebook output content" "$output" "col1"
+
+    # Code cell with error
+    assert_contains "notebook error cell" "$output" "Cell 3"
+    assert_contains "notebook error ename" "$output" "AttributeError"
+    assert_contains "notebook error evalue" "$output" "invalid_method"
+
+    # Code cell with no output (empty outputs array)
+    assert_contains "notebook empty output cell" "$output" "Cell 4"
+    assert_contains "notebook empty output source" "$output" "x = 42"
+
+    # Code cell with image output
+    assert_contains "notebook image placeholder" "$output" "[image/png output]"
+    assert_contains "notebook plot source" "$output" "plt.plot"
+
+    # Raw cell
+    assert_contains "notebook raw cell" "$output" "raw"
+    assert_contains "notebook raw content" "$output" "Raw cell content"
+
+    # Help
+    output=$("$RQS" --repo "$FIXTURE_DIR" notebook --help 2>&1)
+    assert_contains "notebook help" "$output" "Usage: rqs notebook"
+
+    # Error: no args
+    assert_exit_code "notebook no args" 1 "$RQS" --repo "$FIXTURE_DIR" notebook
+
+    # Error: wrong extension
+    assert_exit_code "notebook wrong extension" 1 "$RQS" --repo "$FIXTURE_DIR" notebook src/main.py
+
+    # Error: nonexistent file
+    assert_exit_code "notebook nonexistent" 1 "$RQS" --repo "$FIXTURE_DIR" notebook nonexistent.ipynb
+}
+
+# ── Test: Notebook Debug ────────────────────────────────────────────────────
+
+test_notebook_debug() {
+    echo "Testing: notebook --debug"
+
+    local output
+
+    # ── Debug test notebook with repo-local error ──
+    output=$("$RQS" --repo "$FIXTURE_DIR" notebook notebooks/debug_test.ipynb --debug 2>&1)
+
+    # Header and error count
+    assert_contains "debug header" "$output" "## Notebook Debug:"
+    assert_contains "debug filename" "$output" "debug_test.ipynb"
+    assert_contains "debug error count" "$output" "2 errors found"
+    assert_contains "debug error names" "$output" "ValueError"
+    assert_contains "debug error names 2" "$output" "ZeroDivisionError"
+
+    # Error summary
+    assert_contains "debug ValueError summary" "$output" "ValueError: Input must not be empty"
+    assert_contains "debug ZeroDivision summary" "$output" "ZeroDivisionError: division by zero"
+
+    # Frame classification
+    assert_contains "debug notebook-local label" "$output" "notebook-local"
+    assert_contains "debug repo-local label" "$output" "repo-local"
+
+    # Repo file in traceback
+    assert_contains "debug repo file path" "$output" "src/utils/helpers.py"
+
+    # Enclosing function source with >>> marker
+    assert_contains "debug error line marker" "$output" ">>>"
+    assert_contains "debug enclosing function" "$output" "validate_input"
+
+    # Dependency trace section
+    assert_contains "debug dependency trace" "$output" "Dependency Trace"
+
+    # Diagnostic summary
+    assert_contains "debug diagnostic summary" "$output" "Diagnostic Summary"
+    assert_contains "debug suggested commands" "$output" "Suggested commands"
+    assert_contains "debug suggested rqs context" "$output" "rqs context"
+
+    # ── Clean notebook (no errors) ──
+    output=$("$RQS" --repo "$FIXTURE_DIR" notebook notebooks/clean.ipynb --debug 2>&1)
+    assert_contains "debug no errors" "$output" "No errors found"
+
+    # ── Error cases ──
+    assert_exit_code "debug wrong extension" 1 "$RQS" --repo "$FIXTURE_DIR" notebook src/main.py --debug
+    assert_exit_code "debug nonexistent" 1 "$RQS" --repo "$FIXTURE_DIR" notebook nonexistent.ipynb --debug
+
+    # ── --debug in help text ──
+    output=$("$RQS" --repo "$FIXTURE_DIR" notebook --help 2>&1)
+    assert_contains "debug in help" "$output" "--debug"
 }
 
 # ── Test: Error Handling ────────────────────────────────────────────────────
@@ -374,6 +691,22 @@ echo ""
 test_primer
 echo ""
 test_prompt
+echo ""
+test_show
+echo ""
+test_context
+echo ""
+test_diff
+echo ""
+test_files
+echo ""
+test_callees
+echo ""
+test_related
+echo ""
+test_notebook
+echo ""
+test_notebook_debug
 echo ""
 test_errors
 

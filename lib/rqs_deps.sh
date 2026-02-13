@@ -118,12 +118,15 @@ for node in ast.walk(tree):
     elif isinstance(node, ast.ImportFrom):
         if node.module:
             mod = node.module
+            names = ', '.join(a.name for a in node.names) if node.names else ''
+            suffix = f' ({names})' if names else ''
             if node.level > 0:
                 # Relative import — always internal
-                print(f'INTERNAL:{\".\".join([\".\" * node.level, mod])}')
+                label = '.' * node.level + mod
+                print(f'INTERNAL:{label}{suffix}')
             else:
                 prefix = 'INTERNAL' if is_internal(mod) else 'EXTERNAL'
-                print(f'{prefix}:{mod}')
+                print(f'{prefix}:{mod}{suffix}')
 " "$abs_path" "$rel_path" "$RQS_TARGET_REPO" | sort -u | rqs_render deps "$rel_path"
 }
 

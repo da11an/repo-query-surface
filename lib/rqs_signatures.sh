@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# rqs_signatures.sh — extract structural signatures from Python files
+# rqs_signatures.sh — extract structural signatures from source files
 
 cmd_signatures() {
     local target=""
@@ -18,7 +18,7 @@ Options:
   file|dir   Scope to a specific file or directory (default: entire repo)
   --help     Show this help
 
-Currently supports Python files (.py) via AST analysis.
+Python files use full AST analysis. Other languages use ctags signatures.
 EOF
                 return 0
                 ;;
@@ -27,8 +27,6 @@ EOF
         esac
     done
 
-    local py_files
-
     if [[ -n "$target" ]]; then
         local resolved
         resolved=$(rqs_resolve_path "$target")
@@ -36,24 +34,23 @@ EOF
         rel=$(rqs_relative_path "$resolved")
 
         if [[ -f "$resolved" ]]; then
-            if [[ "$rel" != *.py ]]; then
-                rqs_error "signatures: only Python files are supported (got $rel)"
-            fi
             echo "$rel" | rqs_render signatures --scope "$rel"
         else
-            py_files=$(rqs_list_files "$rel" | grep '\.py$' || true)
-            if [[ -z "$py_files" ]]; then
+            local files
+            files=$(rqs_list_files "$rel" || true)
+            if [[ -z "$files" ]]; then
                 echo "" | rqs_render signatures --scope "$rel"
             else
-                echo "$py_files" | rqs_render signatures --scope "$rel"
+                echo "$files" | rqs_render signatures --scope "$rel"
             fi
         fi
     else
-        py_files=$(rqs_list_files | grep '\.py$' || true)
-        if [[ -z "$py_files" ]]; then
+        local files
+        files=$(rqs_list_files || true)
+        if [[ -z "$files" ]]; then
             echo "" | rqs_render signatures
         else
-            echo "$py_files" | rqs_render signatures
+            echo "$files" | rqs_render signatures
         fi
     fi
 }
