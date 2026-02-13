@@ -35,6 +35,9 @@ EOF
         esac
     done
 
+    echo "<prompt>"
+    echo "<instructions>"
+
     # ── Orientation ──
     cat <<'EOF'
 # Repository Context Instructions
@@ -97,6 +100,7 @@ deps for the same module, or slices of three related functions, request them all
 once. Avoid requesting context you won't use, but don't create unnecessary round
 trips by asking for one thing at a time.
 EOF
+    echo "</instructions>"
 
     # ── Task-specific section ──
     case "$task" in
@@ -104,6 +108,8 @@ EOF
             # No task — general orientation only
             ;;
         debug)
+            echo ""
+            echo '<task type="debug">'
             cat <<'EOF'
 
 ## Task: Debug
@@ -122,8 +128,11 @@ When you identify the issue, explain:
 - Why it occurs (root cause)
 - What the fix should be (with a code suggestion if possible)
 EOF
+            echo "</task>"
             ;;
         feature)
+            echo ""
+            echo '<task type="feature">'
             cat <<'EOF'
 
 ## Task: Feature Design
@@ -141,8 +150,11 @@ Provide:
 - What existing patterns to follow
 - A concrete implementation sketch
 EOF
+            echo "</task>"
             ;;
         review)
+            echo ""
+            echo '<task type="review">'
             cat <<'EOF'
 
 ## Task: Code Review
@@ -161,8 +173,11 @@ Assess:
 - Edge cases: Error handling, boundary conditions, empty inputs
 - Dependencies: Are new dependencies justified?
 EOF
+            echo "</task>"
             ;;
         explain)
+            echo ""
+            echo '<task type="explain">'
             cat <<'EOF'
 
 ## Task: Code Explanation
@@ -180,9 +195,12 @@ Explain:
 - Design decisions and their trade-offs
 - How the components fit together
 EOF
+            echo "</task>"
             ;;
         *)
             rqs_error "prompt: unknown task '$task' (valid: debug, feature, review, explain)"
             ;;
     esac
+
+    echo "</prompt>"
 }

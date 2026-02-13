@@ -46,10 +46,5 @@ EOF
         | grep -vE "$RQS_IGNORE_REGEX" \
         | sort) || true
 
-    if [[ -z "$matched" ]]; then
-        echo "*(no files matching \`$pattern\`)*"
-        return
-    fi
-
     echo "$matched" | rqs_render files "$pattern"
 }

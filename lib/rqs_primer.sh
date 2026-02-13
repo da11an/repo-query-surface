@@ -50,6 +50,8 @@ EOF
     fi
     echo ""
 
+    echo "<repository_primer>"
+
     local repo_name
     repo_name=$(basename "$(readlink -f "$RQS_TARGET_REPO")")
 
@@ -91,6 +93,8 @@ EOF
         primer_dependency_wiring
         echo ""
     fi
+
+    echo "</repository_primer>"
 }
 
 primer_strategy_context() {

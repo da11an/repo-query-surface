@@ -15,6 +15,31 @@ import warnings
 from collections import defaultdict
 
 
+def _xml_escape_attr(value):
+    """Escape attribute values for XML-style wrapper tags."""
+    if value is None:
+        return ""
+    return (str(value)
+            .replace("&", "&amp;")
+            .replace('"', "&quot;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;"))
+
+
+def _open_tag(tag, **attrs):
+    """Emit a simple XML-style opening tag."""
+    if attrs:
+        rendered = " ".join(f'{k}="{_xml_escape_attr(v)}"' for k, v in attrs.items())
+        print(f"<{tag} {rendered}>")
+    else:
+        print(f"<{tag}>")
+
+
+def _close_tag(tag):
+    """Emit a simple XML-style closing tag."""
+    print(f"</{tag}>")
+
+
 # ── Tree Rendering ──────────────────────────────────────────────────────────
 
 
@@ -263,6 +288,7 @@ def render_symbols(args):
 
     for path in sorted(by_file.keys()):
         syms = by_file[path]
+        _open_tag("file", path=path)
         print(f"\n### `{path}`")
         print("| Symbol | Kind | Lines | Signature |")
         print("|--------|------|-------|-----------|")
@@ -277,6 +303,7 @@ def render_symbols(args):
                 name = f"{scope_info}.{name}"
             lines_str = f"{line}-{end}" if end else str(line)
             print(f"| `{name}` | {kind} | {lines_str} | `{sig}` |" if sig else f"| `{name}` | {kind} | {lines_str} | |")
+        _close_tag("file")
 
 
 # ── Outline Rendering ──────────────────────────────────────────────────────
@@ -817,11 +844,13 @@ def render_signatures(args):
     print("> Behavioral sketch: signatures, structure, and key details per file. Request `rqs slice <file> <start> <end>` to see full code.")
 
     for filepath, sig_lines, lang in results:
+        _open_tag("file", path=filepath, language=lang or "text")
         print(f"\n### `{filepath}`")
         print(f"```{lang}")
         for line in sig_lines:
             print(line)
         print("```")
+        _close_tag("file")
 
 
 # ── Show Rendering ─────────────────────────────────────────────────────────
@@ -899,6 +928,7 @@ def render_show(args):
         ext = os.path.splitext(path)[1]
         lang = _LANG_MAP.get(ext, "")
 
+        _open_tag("symbol", name=display_name, kind=kind, path=path, start=start, end=end)
         print(f"## Show: `{display_name}` ({kind} in `{path}`, lines {start}-{end})")
         print(f"> Full source of `{display_name}`. Request `rqs references {symbol}` for usage, or `rqs show <other>` for related symbols.")
         print(f"```{lang}")
@@ -906,6 +936,7 @@ def render_show(args):
         for i, line in enumerate(extracted, start=start):
             print(f"{i:>{width}}: {line}", end="")
         print("```")
+        _close_tag("symbol")
         print()
 
 
@@ -1447,6 +1478,7 @@ def render_notebook(args):
         if isinstance(source, list):
             source = "".join(source)
 
+        _open_tag("cell", index=i, cell_type=cell_type)
         print(f"\n---\n*Cell {i} \u2014 {cell_type}", end="")
 
         if cell_type == "code":
@@ -1490,6 +1522,8 @@ def render_notebook(args):
             print(source, end="")
             if source and not source.endswith("\n"):
                 print()
+
+        _close_tag("cell")
 
 
 # ── Notebook Debug Rendering ─────────────────────────────────────────────────
@@ -1959,7 +1993,11 @@ def main():
         print(f"error: unknown render mode '{mode}'", file=sys.stderr)
         sys.exit(1)
 
-    MODES[mode](args)
+    _open_tag(mode)
+    try:
+        MODES[mode](args)
+    finally:
+        _close_tag(mode)
 
 
 if __name__ == "__main__":

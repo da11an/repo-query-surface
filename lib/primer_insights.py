@@ -37,6 +37,26 @@ ENTRY_NAME_HINTS = {
 }
 
 
+def _xml_escape_attr(value: object) -> str:
+    return (str(value)
+            .replace("&", "&amp;")
+            .replace('"', "&quot;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;"))
+
+
+def _open_tag(name: str, **attrs: object) -> None:
+    if attrs:
+        rendered = " ".join(f'{k}="{_xml_escape_attr(v)}"' for k, v in attrs.items())
+        print(f"<{name} {rendered}>")
+    else:
+        print(f"<{name}>")
+
+
+def _close_tag(name: str) -> None:
+    print(f"</{name}>")
+
+
 @dataclass
 class DispatchEntry:
     command: str
@@ -562,6 +582,7 @@ def render_fast_start(
     dispatch_entries: Sequence[DispatchEntry],
     read_order: Sequence[Tuple[str, str]],
 ) -> None:
+    _open_tag("fast_start_map")
     print("## Fast Start Map")
     print("> Deterministic onboarding map: likely entrypoints, dispatch surface, and a suggested first-read path.")
 
@@ -600,9 +621,11 @@ def render_fast_start(
     else:
         for idx, (path, reason) in enumerate(read_order[:10], start=1):
             print(f"{idx}. `{path}` — {reason}")
+    _close_tag("fast_start_map")
 
 
 def render_runtime_boundaries(findings: Sequence[Tuple[str, List[Tuple[str, int, str]]]]) -> None:
+    _open_tag("runtime_boundaries")
     print("## Runtime Boundaries")
     print("> Guardrails and operational constraints inferred from implementation patterns.")
     any_match = False
@@ -613,6 +636,7 @@ def render_runtime_boundaries(findings: Sequence[Tuple[str, List[Tuple[str, int,
             print(f"- {label}: {refs}")
     if not any_match:
         print("- *(no strong boundary signals detected)*")
+    _close_tag("runtime_boundaries")
 
 
 def render_behavioral_contract(
@@ -621,10 +645,12 @@ def render_behavioral_contract(
     assertions: int,
     command_hits: Counter,
 ) -> None:
+    _open_tag("behavioral_contract")
     print("## Behavioral Contract (Tests)")
     print("> What the test suite explicitly validates today.")
     if not test_files:
         print("- *(no test files detected)*")
+        _close_tag("behavioral_contract")
         return
 
     print(f"- Test files detected: {len(test_files)}")
@@ -637,13 +663,16 @@ def render_behavioral_contract(
     else:
         for cmd, hits in command_hits.most_common(10):
             print(f"- `{cmd}` ({hits} references)")
+    _close_tag("behavioral_contract")
 
 
 def render_critical_path(scores: Sequence[Tuple[str, float, Dict[str, float]]]) -> None:
+    _open_tag("critical_path_files")
     print("## Critical Path Files")
     print("> Heuristic centrality ranking using entrypoint/dispatch role, dependency fan-in, and test touch points.")
     if not scores:
         print("- *(no critical-path signals detected)*")
+        _close_tag("critical_path_files")
         return
 
     print("| File | Score | Signals |")
@@ -660,19 +689,23 @@ def render_critical_path(scores: Sequence[Tuple[str, float, Dict[str, float]]]) 
             signals.append(f"test-touch {int(comp['test'])}")
         signal_text = ", ".join(signals) if signals else "size/symbol density"
         print(f"| `{rel}` | {score:.1f} | {signal_text} |")
+    _close_tag("critical_path_files")
 
 
 def render_risk_hotspots(hotspots: Sequence[Tuple[str, int, str, str]]) -> None:
+    _open_tag("heuristic_risk_hotspots")
     print("## Heuristic Risk Hotspots")
     print("> Areas where behavior may be approximate, suppressed, or brittle under edge conditions.")
     if not hotspots:
         print("- *(no obvious hotspots detected by heuristics)*")
+        _close_tag("heuristic_risk_hotspots")
         return
 
     print("| File | Signal | Snippet |")
     print("|------|--------|---------|")
     for rel, line, label, snippet in hotspots[:12]:
         print(f"| `{rel}:{line}` | {label} | `{snippet}` |")
+    _close_tag("heuristic_risk_hotspots")
 
 
 def derive_read_order(
