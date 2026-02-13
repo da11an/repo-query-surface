@@ -114,6 +114,7 @@ rqs_relative_path() {
 # ── ctags Integration ──────────────────────────────────────────────────────
 
 RQS_CTAGS_OUTPUT_FORMAT=""
+RQS_CTAGS_CLASSIC_FIELDS=""
 
 rqs_detect_ctags() {
     # Cache detection result
@@ -123,6 +124,7 @@ rqs_detect_ctags() {
 
     if ! command -v ctags &>/dev/null; then
         RQS_CTAGS_OUTPUT_FORMAT=""
+        RQS_CTAGS_CLASSIC_FIELDS=""
         return 1
     fi
 
@@ -131,9 +133,16 @@ rqs_detect_ctags() {
     if echo "$ver" | grep -qi "universal"; then
         # Universal Ctags supports JSON output
         RQS_CTAGS_OUTPUT_FORMAT="json"
+        RQS_CTAGS_CLASSIC_FIELDS=""
     else
-        # Exuberant (or unknown) – fall back to classic tags format
+        # Exuberant (or unknown) – use classic tags format.
+        # Request signature fields when supported; fall back to line numbers only.
         RQS_CTAGS_OUTPUT_FORMAT="classic"
+        if ctags --fields=+nS -f - /dev/null >/dev/null 2>&1; then
+            RQS_CTAGS_CLASSIC_FIELDS="+nS"
+        else
+            RQS_CTAGS_CLASSIC_FIELDS="+n"
+        fi
     fi
 }
 
@@ -147,8 +156,11 @@ rqs_ctags_args() {
     if [[ "$RQS_CTAGS_OUTPUT_FORMAT" == "json" ]]; then
         echo "--output-format=json --fields=+nKSse"
     else
-        # Classic tags format: we only need line numbers
-        echo "--fields=+n"
+        # Classic tags format (Exuberant/legacy): include signatures if available.
+        if [[ -z "$RQS_CTAGS_CLASSIC_FIELDS" ]]; then
+            RQS_CTAGS_CLASSIC_FIELDS="+n"
+        fi
+        echo "--fields=$RQS_CTAGS_CLASSIC_FIELDS"
     fi
 }
 
