@@ -567,7 +567,9 @@ def render_fast_start(
 
     print("\n**Likely entrypoints:**")
     if not entrypoints:
-        print("- *(none detected)*")
+        print("- *(no likely entrypoints detected by current heuristics)*")
+        print("- Expected signals include executable files in `bin/`, entry-like filenames (`main`, `app`, `cli`, `server`), Python `__main__` blocks, and CLI parser wiring.")
+        print("- Implication: this repo may be library-first, config/framework-driven, monorepo-style, or using entry conventions not covered by current static checks.")
     else:
         for ep in entrypoints[:6]:
             signals = ", ".join(ep.signals[:3]) if ep.signals else "heuristic"
@@ -576,6 +578,8 @@ def render_fast_start(
     print("\n**Detected dispatch surface:**")
     if not dispatch_entries:
         print("- *(no explicit dispatch map detected)*")
+        print("- The detector currently maps shell `case \"$...\"` style command routing and Python `argparse add_parser(...)` command tables.")
+        print("- Implication: control flow may be framework/router-driven, config/plugin-driven, direct-call without a command router, or outside the currently parsed patterns.")
     else:
         print("| Command | Entrypoint | Handler |")
         print("|---------|------------|---------|")
