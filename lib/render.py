@@ -1266,11 +1266,11 @@ def render_related(args):
         if line.startswith("FORWARD:"):
             content = line[len("FORWARD:"):]
             if content:
-                forward_files = [f.strip() for f in content.split("\n") if f.strip()]
+                forward_files.append(content.strip())
         elif line.startswith("REVERSE:"):
             content = line[len("REVERSE:"):]
             if content:
-                reverse_files = [f.strip() for f in content.split("\n") if f.strip()]
+                reverse_files.append(content.strip())
 
     # Compute line counts for referenced files
     all_related = set(forward_files + reverse_files)

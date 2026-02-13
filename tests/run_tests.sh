@@ -218,11 +218,15 @@ test_grep() {
 test_primer() {
     echo "Testing: primer"
 
-    # Default (medium) includes prompt + header + tree + symbols + summaries
+    # Default (medium) includes orientation + onboarding maps + tree + symbols + summaries
     local output
     output=$("$RQS" --repo "$FIXTURE_DIR" primer 2>&1)
     assert_contains "primer has repo name" "$output" "# Repository Primer"
     assert_contains "primer has prompt orientation" "$output" "# Repository Context Instructions"
+    assert_contains "primer has fast start map" "$output" "## Fast Start Map"
+    assert_contains "primer has runtime boundaries" "$output" "## Runtime Boundaries"
+    assert_contains "primer has behavioral contract" "$output" "## Behavioral Contract (Tests)"
+    assert_contains "primer has critical path" "$output" "## Critical Path Files"
     assert_contains "primer has tree" "$output" "## Tree"
     assert_contains "primer has symbols" "$output" "## Symbols"
     assert_contains "primer has module summaries" "$output" "## Module Summaries"
@@ -231,21 +235,30 @@ test_primer() {
     assert_not_contains "primer default no signatures" "$output" "## Signatures"
     assert_not_contains "primer default no deps" "$output" "## Internal Dependencies"
 
-    # Light: prompt + header + tree, no symbols or summaries
+    # Light: prompt + header + fast-start + boundaries + tree, no medium/heavy sections
     output=$("$RQS" --repo "$FIXTURE_DIR" primer --light 2>&1)
     assert_contains "primer light has prompt" "$output" "# Repository Context Instructions"
     assert_contains "primer light has repo name" "$output" "# Repository Primer"
+    assert_contains "primer light has fast start map" "$output" "## Fast Start Map"
+    assert_contains "primer light has runtime boundaries" "$output" "## Runtime Boundaries"
     assert_contains "primer light has tree" "$output" "## Tree"
+    assert_not_contains "primer light no behavioral contract" "$output" "## Behavioral Contract (Tests)"
+    assert_not_contains "primer light no critical path" "$output" "## Critical Path Files"
     assert_not_contains "primer light no symbols" "$output" "## Symbols"
     assert_not_contains "primer light no summaries" "$output" "## Module Summaries"
 
-    # Heavy: everything including signatures + deps
+    # Heavy: everything including signatures + deps + heuristic hotspots
     output=$("$RQS" --repo "$FIXTURE_DIR" primer --heavy 2>&1)
     assert_contains "primer heavy has prompt" "$output" "# Repository Context Instructions"
+    assert_contains "primer heavy has fast start map" "$output" "## Fast Start Map"
+    assert_contains "primer heavy has runtime boundaries" "$output" "## Runtime Boundaries"
+    assert_contains "primer heavy has behavioral contract" "$output" "## Behavioral Contract (Tests)"
+    assert_contains "primer heavy has critical path" "$output" "## Critical Path Files"
     assert_contains "primer heavy has tree" "$output" "## Tree"
     assert_contains "primer heavy has symbols" "$output" "## Symbols"
     assert_contains "primer heavy has signatures" "$output" "## Signatures"
     assert_contains "primer heavy has deps" "$output" "## Internal Dependencies"
+    assert_contains "primer heavy has hotspots" "$output" "## Heuristic Risk Hotspots"
 
     # Task flag
     output=$("$RQS" --repo "$FIXTURE_DIR" primer --task debug 2>&1)

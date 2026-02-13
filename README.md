@@ -44,7 +44,7 @@ No compilation, no virtual environments, no dependencies to install.
 
 ```bash
 # From inside any git repository:
-rqs primer              # Standard primer: orientation + tree + symbols + summaries
+rqs primer              # Standard primer: orientation + fast-start map + tree + symbols + summaries
 rqs tree                # Directory tree
 rqs symbols             # Symbol index (classes, functions, types)
 rqs outline src/app.py  # Structural outline of one file
@@ -76,16 +76,16 @@ The starting point. Generates a tiered markdown document combining prompt orient
 
 | Tier | Content |
 |------|---------|
-| `--light` | Prompt orientation + repo header + README summary + tree |
-| `--medium` (default) | Light + symbol index + module summaries |
-| `--heavy` | Medium + signatures (whole repo) + dependency wiring |
+| `--light` | Prompt orientation + repo header + README summary + fast-start map + runtime boundaries + tree |
+| `--medium` (default) | Light + behavioral contract from tests + critical path files + symbol index + module summaries |
+| `--heavy` | Medium + signatures (whole repo) + dependency wiring + heuristic risk hotspots |
 
 Use `--task TASK` to include task-specific framing (debug, feature, review, explain) — the same framing available via `rqs prompt`.
 
 ```bash
 rqs primer                          # Standard (medium) primer
-rqs primer --light                  # Quick orientation paste
-rqs primer --heavy                  # Full behavioral sketch
+rqs primer --light                  # Quick orientation + control-flow map
+rqs primer --heavy                  # Full behavioral + risk sketch
 rqs primer --task debug             # Medium primer with debugging framing
 rqs primer --light --task review    # Quick primer with code review framing
 rqs primer --tree-depth 2 --max-symbols 200

@@ -22,9 +22,9 @@ Usage: rqs primer [--light|--medium|--heavy] [--task TASK] [--tree-depth N] [--m
 Generate a tiered static primer for the repository.
 
 Tiers:
-  --light    Quick orientation: prompt + header + tree
-  --medium   Standard (default): light + symbols + module summaries
-  --heavy    Full sketch: medium + signatures + dependency wiring
+  --light    Quick orientation: prompt + header + fast-start map + boundaries + tree
+  --medium   Standard (default): light + test contract + critical path + symbols + module summaries
+  --heavy    Full sketch: medium + signatures + dependency wiring + heuristic hotspots
 
 Options:
   --task TASK        Include task-specific framing (debug, feature, review, explain)
@@ -60,6 +60,10 @@ EOF
     # Include README summary if available
     primer_readme_summary
 
+    # ── Deterministic onboarding context (all tiers, depth varies by level) ──
+    primer_strategy_context "$level"
+    echo ""
+
     # ── Tree (all tiers) ──
     echo ""
     rqs_list_files | rqs_render tree --depth "$tree_depth" --root "."
@@ -87,6 +91,11 @@ EOF
         primer_dependency_wiring
         echo ""
     fi
+}
+
+primer_strategy_context() {
+    local level="$1"
+    python3 "$RQS_LIB_DIR/primer_insights.py" --repo "$RQS_TARGET_REPO" --level "$level"
 }
 
 primer_readme_summary() {

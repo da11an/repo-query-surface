@@ -52,10 +52,15 @@ EOF
     local reverse
     reverse=$(related_reverse "$rel")
 
-    # Render
+    # Render as line-oriented records so multi-file results are preserved.
     {
-        echo "FORWARD:$forward"
-        echo "REVERSE:$reverse"
+        while IFS= read -r dep; do
+            [[ -n "$dep" ]] && echo "FORWARD:$dep"
+        done <<< "$forward"
+        while IFS= read -r dep; do
+            [[ -n "$dep" ]] && echo "REVERSE:$dep"
+        done <<< "$reverse"
+        :
     } | rqs_render related "$rel"
 }
 
