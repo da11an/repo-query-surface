@@ -213,23 +213,19 @@ primer_dependency_wiring() {
     echo "## Internal Dependencies"
     echo ""
 
+    local max_all="${RQS_PRIMER_DEPS_MAX_ALL:-50}"
+    local top_n="${RQS_PRIMER_DEPS_TOP_N:-50}"
     local py_files
     py_files=$(rqs_list_files | grep '\.py$' || true)
 
     if [[ -z "$py_files" ]]; then
         # Try other languages
-        local has_deps=false
         local all_files
         all_files=$(rqs_list_files)
 
         if [[ -n "$all_files" ]]; then
-            echo "| File | Imports |"
-            echo "|------|---------|"
-
-            local tracked
-            tracked=$(cd "$RQS_TARGET_REPO" && git ls-files)
-
-            echo "$all_files" | while IFS= read -r f; do
+            local rows=""
+            while IFS= read -r f; do
                 local ext="${f##*.}"
                 local abs="$RQS_TARGET_REPO/$f"
                 [[ ! -f "$abs" ]] && continue
@@ -242,14 +238,17 @@ primer_dependency_wiring() {
                     if [[ -n "$sources" ]]; then
                         local deps_list
                         deps_list=$(echo "$sources" | tr '\n' ', ' | sed 's/,$//')
-                        echo "| \`$f\` | $deps_list |"
-                        has_deps=true
+                        rows="${rows}| \`$f\` | $deps_list |\n"
                     fi
                 fi
-            done
+            done <<< "$all_files"
 
-            if [[ "$has_deps" == "false" ]]; then
+            if [[ -z "$rows" ]]; then
                 echo "*(no internal dependencies detected)*"
+            else
+                echo "| File | Imports |"
+                echo "|------|---------|"
+                printf '%b' "$rows"
             fi
         else
             echo "*(no files to analyze)*"
@@ -257,71 +256,170 @@ primer_dependency_wiring() {
         return
     fi
 
-    # Python dependency graph
-    echo "| File | Internal Imports |"
-    echo "|------|-----------------|"
+    # Python dependency graph (aggregated and ranked)
+    python3 - "$RQS_TARGET_REPO" "$max_all" "$top_n" 3<<<"$py_files" <<'PY'
+import ast
+import os
+import sys
+from collections import Counter, defaultdict
 
-    echo "$py_files" | while IFS= read -r f; do
-        local abs="$RQS_TARGET_REPO/$f"
-        [[ ! -f "$abs" ]] && continue
-
-        local internal_deps
-        internal_deps=$(python3 -c "
-import ast, sys, os, subprocess
-
-filepath = sys.argv[1]
-rel_path = sys.argv[2]
-repo_root = sys.argv[3]
-
+repo_root = sys.argv[1]
 try:
-    with open(filepath) as fh:
-        tree = ast.parse(fh.read())
-except SyntaxError:
+    max_all = max(1, int(sys.argv[2]))
+except ValueError:
+    max_all = 50
+try:
+    top_n = max(1, int(sys.argv[3]))
+except ValueError:
+    top_n = 50
+
+with os.fdopen(3) as py_stream:
+    py_files = [line.strip() for line in py_stream if line.strip()]
+if not py_files:
+    print("*(no Python files to analyze)*")
     sys.exit(0)
 
-tracked = set()
-try:
-    result = subprocess.run(['git', 'ls-files'], cwd=repo_root,
-                          capture_output=True, text=True)
-    tracked = set(result.stdout.strip().split('\n'))
-except Exception:
-    pass
+py_set = set(py_files)
 
-def is_internal(module_name):
-    parts = module_name.split('.')
-    candidates = [
-        '/'.join(parts) + '.py',
-        '/'.join(parts) + '/__init__.py',
-    ]
-    file_dir = os.path.dirname(rel_path)
-    if file_dir:
-        candidates.extend([
-            file_dir + '/' + '/'.join(parts) + '.py',
-            file_dir + '/' + '/'.join(parts) + '/__init__.py',
-        ])
-    for c in candidates:
-        if c in tracked:
+# Detect likely source roots to support src/ layouts.
+source_roots = {""}
+for path in py_files:
+    parts = path.split("/")
+    if len(parts) > 1:
+        source_roots.add(parts[0])
+
+# Directory paths containing Python modules (supports namespace packages).
+py_dirs = set()
+for path in py_files:
+    d = os.path.dirname(path)
+    while d and d != ".":
+        py_dirs.add(d)
+        d = os.path.dirname(d)
+
+
+def module_to_rel(module):
+    return module.replace(".", "/")
+
+
+def is_internal_module(module):
+    if not module:
+        return False
+    rel = module_to_rel(module)
+    candidates = set()
+    for root in source_roots:
+        prefix = f"{root}/" if root else ""
+        candidates.add(f"{prefix}{rel}.py")
+        candidates.add(f"{prefix}{rel}/__init__.py")
+    if any(candidate in py_set for candidate in candidates):
+        return True
+    # Namespace package (directory with Python files below it).
+    for root in source_roots:
+        prefix = f"{root}/" if root else ""
+        if f"{prefix}{rel}" in py_dirs:
             return True
     return False
 
-internal = []
-for node in ast.walk(tree):
-    if isinstance(node, ast.Import):
-        for alias in node.names:
-            if is_internal(alias.name):
-                internal.append(alias.name)
-    elif isinstance(node, ast.ImportFrom):
-        if node.module and node.level == 0 and is_internal(node.module):
-            internal.append(node.module)
-        elif node.level > 0 and node.module:
-            internal.append('.' * node.level + node.module)
 
-if internal:
-    print(', '.join(sorted(set(internal))))
-" "$abs" "$f" "$RQS_TARGET_REPO" 2>/dev/null || true)
+def path_to_module(path):
+    if not path.endswith(".py"):
+        return ""
+    no_ext = path[:-3]
+    if no_ext.endswith("/__init__"):
+        no_ext = no_ext[: -len("/__init__")]
+    return no_ext.replace("/", ".")
 
-        if [[ -n "$internal_deps" ]]; then
-            echo "| \`$f\` | $internal_deps |"
-        fi
-    done
+
+def current_package(path):
+    module = path_to_module(path)
+    if not module:
+        return ""
+    if path.endswith("/__init__.py"):
+        return module
+    if "." in module:
+        return module.rsplit(".", 1)[0]
+    return ""
+
+
+def resolve_relative_import(pkg, level, module):
+    parts = pkg.split(".") if pkg else []
+    if level > 0:
+        pop_count = level - 1
+        if pop_count > 0:
+            parts = parts[:-pop_count] if pop_count < len(parts) else []
+    if module:
+        parts += module.split(".")
+    return ".".join(p for p in parts if p)
+
+
+counts = Counter()
+importers = defaultdict(set)
+
+for rel_path in sorted(py_set):
+    abs_path = os.path.join(repo_root, rel_path)
+    try:
+        with open(abs_path, encoding="utf-8") as fh:
+            tree = ast.parse(fh.read(), filename=rel_path)
+    except (OSError, UnicodeDecodeError, SyntaxError):
+        continue
+
+    pkg = current_package(rel_path)
+    seen_edges = set()
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                mod = alias.name
+                if is_internal_module(mod):
+                    seen_edges.add(mod)
+        elif isinstance(node, ast.ImportFrom):
+            base = ""
+            if node.level > 0:
+                base = resolve_relative_import(pkg, node.level, node.module)
+                if base and is_internal_module(base):
+                    seen_edges.add(base)
+            elif node.module:
+                base = node.module
+                if is_internal_module(base):
+                    seen_edges.add(base)
+
+            # Handle "from X import Y" where Y may be a submodule.
+            if base:
+                for alias in node.names:
+                    if alias.name == "*":
+                        continue
+                    candidate = f"{base}.{alias.name}"
+                    if is_internal_module(candidate):
+                        seen_edges.add(candidate)
+
+    for mod in seen_edges:
+        counts[mod] += 1
+        importers[mod].add(rel_path)
+
+if not counts:
+    print("*(no internal dependencies detected)*")
+    sys.exit(0)
+
+ranked = sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+unique_modules = len(ranked)
+total_edges = sum(counts.values())
+
+if unique_modules <= max_all:
+    shown = ranked
+    print(
+        f"> Internal Python imports: {unique_modules} modules, {total_edges} import edges. "
+        f"Showing all modules (<= {max_all})."
+    )
+else:
+    shown = ranked[:top_n]
+    print(
+        f"> Internal Python imports: {unique_modules} modules, {total_edges} import edges. "
+        f"Showing top {len(shown)} modules by import count."
+    )
+
+print("")
+print("| Internal Module | Import Count | Imported By Files |")
+print("|-----------------|--------------|-------------------|")
+for module, count in shown:
+    print(f"| `{module}` | {count} | {len(importers[module])} |")
+PY
 }

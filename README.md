@@ -80,6 +80,8 @@ The starting point. Generates a tiered markdown document combining prompt orient
 | `--medium` (default) | Light + behavioral contract from tests + critical path files + symbol index + module summaries |
 | `--heavy` | Medium + signatures (whole repo) + dependency wiring + heuristic risk hotspots |
 
+In Python repos, heavy-mode dependency wiring aggregates internal module imports with counts: if total modules are `<= RQS_PRIMER_DEPS_MAX_ALL`, it shows all; otherwise it shows top `RQS_PRIMER_DEPS_TOP_N` by import count.
+
 Use `--task TASK` to include task-specific framing (debug, feature, review, explain) — the same framing available via `rqs prompt`.
 
 ```bash
@@ -274,6 +276,8 @@ RQS_GREP_MAX_RESULTS=100
 RQS_REF_MAX_RESULTS=50
 RQS_PRIMER_TREE_DEPTH=4
 RQS_PRIMER_MAX_SYMBOLS=1000
+RQS_PRIMER_DEPS_MAX_ALL=50
+RQS_PRIMER_DEPS_TOP_N=50
 RQS_SYMBOL_KINDS="class,function,method,interface,type"
 ```
 

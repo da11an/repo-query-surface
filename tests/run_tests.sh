@@ -258,6 +258,9 @@ test_primer() {
     assert_contains "primer heavy has symbols" "$output" "## Symbols"
     assert_contains "primer heavy has signatures" "$output" "## Signatures"
     assert_contains "primer heavy has deps" "$output" "## Internal Dependencies"
+    assert_contains "primer heavy deps summary" "$output" "Internal Python imports:"
+    assert_contains "primer heavy deps table header" "$output" "| Internal Module | Import Count | Imported By Files |"
+    assert_contains "primer heavy deps has fixture import" "$output" "| \`src.utils.helpers\` | 1 | 1 |"
     assert_contains "primer heavy has hotspots" "$output" "## Heuristic Risk Hotspots"
 
     # Task flag
