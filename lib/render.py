@@ -2308,7 +2308,7 @@ def render_churn(args):
         sustained = sorted(
             ((f, continuity[f]) for f in continuity if continuity[f] >= 0.4),
             key=lambda x: (-x[1], -file_total[x[0]], x[0]),
-        )[:15]
+        )
 
         if sustained:
             print()
