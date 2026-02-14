@@ -6,6 +6,7 @@ cmd_churn() {
     local top_n="${RQS_CHURN_TOP_N}"
     local bucket="${RQS_CHURN_BUCKET:-auto}"
     local sort_arg=""
+    local min_lines_arg=""
     local -a include_args=()
     local -a exclude_args=()
     local -a author_args=()
@@ -25,6 +26,7 @@ Options:
   --top N         Show top N files by total changes (default: 20)
   --bucket N      Commits per heatmap bucket (default: auto; targets ~50 buckets)
   --sort MODE     Sort order: lines (default), commits, or init (first appearance)
+  --min-lines N   Only show files with at least N total lines changed
   --include GLOB  Only include files matching glob (repeatable)
   --exclude GLOB  Exclude files matching glob (repeatable)
   --author NAME   Only include commits by author (repeatable, case-insensitive substring)
@@ -39,6 +41,7 @@ Examples:
   rqs churn v1.0..HEAD                   # Changes since v1.0
   rqs churn --sort init                  # Oldest files first (repo build-out order)
   rqs churn --sort commits               # Most-committed files first
+  rqs churn --min-lines 100              # Only files with >= 100 lines changed
   rqs churn --include "src/*"            # Only files under src/
   rqs churn --exclude "*.md"             # Skip markdown files
   rqs churn --author alice --author bob  # Only commits by alice or bob
@@ -48,6 +51,7 @@ EOF
             --top) top_n="$2"; shift 2 ;;
             --bucket) bucket="$2"; shift 2 ;;
             --sort) sort_arg="$2"; shift 2 ;;
+            --min-lines) min_lines_arg="$2"; shift 2 ;;
             --include) include_args+=(--include "$2"); shift 2 ;;
             --exclude) exclude_args+=(--exclude "$2"); shift 2 ;;
             --author) author_args+=(--author "$2"); shift 2 ;;
@@ -64,7 +68,10 @@ EOF
 
     local -a sort_args=()
     [[ -n "$sort_arg" ]] && sort_args=(--sort "$sort_arg")
+    local -a min_lines_args=()
+    [[ -n "$min_lines_arg" ]] && min_lines_args=(--min-lines "$min_lines_arg")
 
     echo "$log_output" | rqs_render churn --top "$top_n" --bucket "$bucket" \
-        "${sort_args[@]}" "${include_args[@]}" "${exclude_args[@]}" "${author_args[@]}"
+        "${sort_args[@]}" "${min_lines_args[@]}" \
+        "${include_args[@]}" "${exclude_args[@]}" "${author_args[@]}"
 }

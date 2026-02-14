@@ -2083,6 +2083,7 @@ def render_churn(args):
     bucket_size = None
     bucket_auto = True
     sort_mode = "lines"
+    min_lines = 0
     include_globs = []
     exclude_globs = []
     author_filters = []
@@ -2109,6 +2110,9 @@ def render_churn(args):
                 print(f"*(unknown sort mode '{sort_mode}'; use lines, commits, or init)*",
                       file=sys.stderr)
                 sys.exit(1)
+            i += 2
+        elif args[i] == "--min-lines":
+            min_lines = int(args[i + 1])
             i += 2
         elif args[i] == "--include":
             include_globs.append(args[i + 1])
@@ -2169,16 +2173,20 @@ def render_churn(args):
             author_changes += changes
         author_total[author] += author_changes
 
-    # Sort and take top N
+    # Filter by minimum lines, then sort and take top N
+    eligible = file_buckets.keys()
+    if min_lines > 0:
+        eligible = [f for f in eligible if file_total[f] >= min_lines]
+
     if sort_mode == "commits":
-        sorted_files = sorted(file_buckets.keys(),
+        sorted_files = sorted(eligible,
                               key=lambda f: (file_commits[f], file_total[f]),
                               reverse=True)[:top_n]
     elif sort_mode == "init":
-        sorted_files = sorted(file_buckets.keys(),
+        sorted_files = sorted(eligible,
                               key=lambda f: (file_first_seen.get(f, 0), f))[:top_n]
     else:  # lines (default)
-        sorted_files = sorted(file_buckets.keys(),
+        sorted_files = sorted(eligible,
                               key=lambda f: file_total[f], reverse=True)[:top_n]
 
     if not sorted_files:
@@ -2205,6 +2213,8 @@ def render_churn(args):
                    "init": "first appearance (oldest first)"}
     if sort_mode != "lines":
         filter_notes.append(f"sorted by {sort_labels[sort_mode]}")
+    if min_lines > 0:
+        filter_notes.append(f"min {min_lines} lines")
     if include_globs:
         filter_notes.append(f"include: {', '.join(include_globs)}")
     if exclude_globs:

@@ -634,6 +634,15 @@ test_churn() {
     assert_contains "churn sort lines header" "$output" "## Churn"
     assert_not_contains "churn sort lines no sort note" "$output" "sorted by"
 
+    # --min-lines filter
+    output=$("$RQS" --repo "$FIXTURE_DIR" churn --min-lines 50 2>&1)
+    assert_contains "churn min-lines header" "$output" "## Churn"
+    assert_contains "churn min-lines filter note" "$output" "min 50 lines"
+
+    # --min-lines very high (filters everything)
+    output=$("$RQS" --repo "$FIXTURE_DIR" churn --min-lines 999999 2>&1)
+    assert_contains "churn min-lines no match" "$output" "no files match"
+
     # Help
     output=$("$RQS" --repo "$FIXTURE_DIR" churn --help 2>&1)
     assert_contains "churn help" "$output" "Usage: rqs churn"
@@ -641,6 +650,7 @@ test_churn() {
     assert_contains "churn help exclude" "$output" "--exclude"
     assert_contains "churn help author" "$output" "--author"
     assert_contains "churn help sort" "$output" "--sort"
+    assert_contains "churn help min-lines" "$output" "--min-lines"
 }
 
 # ── Test: Notebook ──────────────────────────────────────────────────────────
