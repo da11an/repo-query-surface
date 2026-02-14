@@ -2016,26 +2016,33 @@ SHADES = " \u2591\u2592\u2593\u2588"
 def _parse_churn_log(content):
     """Parse git log --pretty=format:COMMIT --numstat into chronological commit list.
 
-    Returns a list of commits (oldest first), where each commit is a list of
-    (filename, changes) tuples.
+    Returns a list of commits (oldest first), where each commit is a dict:
+    {"author": str, "files": [(filename, changes), ...]}.
     """
     commits = []
     current = []
+    current_author = "(unknown)"
     for line in content.splitlines():
-        if line == "COMMIT":
+        if line.startswith("COMMIT"):
             if current:
-                commits.append(current)
+                commits.append({"author": current_author, "files": current})
             current = []
+            if "\t" in line:
+                _, author = line.split("\t", 1)
+                author = author.strip()
+                current_author = author if author else "(unknown)"
+            else:
+                current_author = "(unknown)"
         elif line.strip():
             parts = line.split("\t")
-            if len(parts) >= 3 and parts[0] != "-":
+            if len(parts) >= 3 and parts[0] != "-" and parts[1] != "-":
                 try:
                     changes = int(parts[0]) + int(parts[1])
                     current.append((parts[2], changes))
                 except ValueError:
                     pass
     if current:
-        commits.append(current)
+        commits.append({"author": current_author, "files": current})
     commits.reverse()  # git log is newest-first; we want chronological
     return commits
 
@@ -2099,13 +2106,23 @@ def render_churn(args):
     file_buckets = defaultdict(lambda: [0] * num_buckets)
     file_commits = Counter()
     file_total = Counter()
+    author_buckets = defaultdict(lambda: [0] * num_buckets)
+    author_commits = Counter()
+    author_total = Counter()
 
-    for ci, commit_files in enumerate(commits):
+    for ci, commit in enumerate(commits):
         bucket_idx = ci // bucket_size
+        author = commit.get("author", "(unknown)")
+        commit_files = commit.get("files", [])
+        author_buckets[author][bucket_idx] += 1
+        author_commits[author] += 1
+        author_changes = 0
         for filename, changes in commit_files:
             file_buckets[filename][bucket_idx] += changes
             file_commits[filename] += 1
             file_total[filename] += changes
+            author_changes += changes
+        author_total[author] += author_changes
 
     # Top N by total changes
     sorted_files = sorted(file_buckets.keys(),
@@ -2152,6 +2169,47 @@ def render_churn(args):
         commits_col = str(file_commits[f]).rjust(max_commits_w)
         total_col = str(file_total[f]).rjust(max_total_w)
         print(f"| {commits_col} | {total_col} | {history_col} | {file_col} |")
+
+    if author_buckets:
+        print()
+        print("### Author Activity")
+        print("> Same timeline buckets, showing which authors were active over time (by commit count).")
+
+        top_authors = sorted(
+            author_buckets.keys(),
+            key=lambda a: (-author_commits[a], -author_total[a], a),
+        )[:10]
+        author_max = max(
+            (author_buckets[a][b] for a in top_authors for b in range(num_buckets)),
+            default=1,
+        ) or 1
+
+        max_author_w = max((len(a) + 2 for a in top_authors), default=6)  # +2 for backticks
+        max_author_w = max(max_author_w, 6)  # at least "Author"
+        max_author_commits_w = max((len(str(author_commits[a])) for a in top_authors), default=1)
+        max_author_total_w = max((len(str(author_total[a])) for a in top_authors), default=1)
+        max_author_commits_w = max(max_author_commits_w, 7)  # at least "Commits"
+        max_author_total_w = max(max_author_total_w, 5)  # at least "Lines"
+        max_activity_w = max(num_buckets + 2, 8)  # bar + backticks, at least "Activity"
+
+        print(f"| {'Commits':>{max_author_commits_w}} | {'Lines':>{max_author_total_w}} | {'Activity':<{max_activity_w}} | {'Author':<{max_author_w}} |")
+        print(f"|{'-' * (max_author_commits_w + 2)}|{'-' * (max_author_total_w + 2)}|{'-' * (max_activity_w + 2)}|{'-' * (max_author_w + 2)}|")
+
+        for author in top_authors:
+            bar = ""
+            for val in author_buckets[author]:
+                if val == 0:
+                    bar += SHADES[0]
+                else:
+                    idx = min(len(SHADES) - 1,
+                              int((val / author_max) * (len(SHADES) - 2)) + 1)
+                    bar += SHADES[idx]
+
+            commits_col = str(author_commits[author]).rjust(max_author_commits_w)
+            lines_col = str(author_total[author]).rjust(max_author_total_w)
+            activity_col = f"`{bar}`".ljust(max_activity_w)
+            author_col = f"`{author}`".ljust(max_author_w)
+            print(f"| {commits_col} | {lines_col} | {activity_col} | {author_col} |")
 
 
 # ── Dispatch ────────────────────────────────────────────────────────────────

@@ -588,6 +588,8 @@ test_churn() {
     assert_contains "churn has description" "$output" "Lines = total lines added + deleted"
     assert_contains "churn shows file" "$output" "src/main.py"
     assert_contains "churn has table header" "$output" "| Commits"
+    assert_contains "churn has author activity section" "$output" "### Author Activity"
+    assert_contains "churn has author activity header" "$output" "| Author"
 
     # With options
     output=$("$RQS" --repo "$FIXTURE_DIR" churn --top 2 2>&1)

@@ -38,7 +38,7 @@ EOF
         esac
     done
 
-    local log_args=("--pretty=format:COMMIT" "--numstat")
+    local log_args=("--pretty=format:COMMIT%x09%an" "--numstat")
     [[ -n "$rev_range" ]] && log_args+=("$rev_range")
 
     local log_output
