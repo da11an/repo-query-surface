@@ -590,6 +590,8 @@ test_churn() {
     assert_contains "churn has table header" "$output" "| Commits"
     assert_contains "churn has author activity section" "$output" "### Author Activity"
     assert_contains "churn has author activity header" "$output" "| Author"
+    # Sustained section requires >= 3 buckets; fixture has 1 commit so it should not appear
+    assert_not_contains "churn no sustained for shallow history" "$output" "### Sustained Development"
 
     # With options
     output=$("$RQS" --repo "$FIXTURE_DIR" churn --top 2 2>&1)

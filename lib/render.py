@@ -2293,6 +2293,52 @@ def render_churn(args):
             author_col = f"`{author}`".ljust(max_author_w)
             print(f"| {commits_col} | {lines_col} | {activity_col} | {author_col} |")
 
+    # ── Sustained Development Files ──
+    # Continuity: of the buckets since a file first appeared, what fraction have activity?
+    if num_buckets >= 3 and file_first_seen:
+        continuity = {}
+        for f in file_buckets:
+            first_b = file_first_seen.get(f, 0)
+            possible = num_buckets - first_b
+            if possible < 2:
+                continue
+            active = sum(1 for val in file_buckets[f][first_b:] if val > 0)
+            continuity[f] = active / possible
+
+        sustained = sorted(
+            ((f, continuity[f]) for f in continuity if continuity[f] >= 0.4),
+            key=lambda x: (-x[1], -file_total[x[0]], x[0]),
+        )[:15]
+
+        if sustained:
+            print()
+            print("### Sustained Development Files")
+            print(f"> Files with ongoing modification across their lifespan. "
+                  f"Continuity = fraction of timeline buckets with activity since the file first appeared. "
+                  f"High-continuity files are likely central to ongoing development.")
+            print()
+
+            # Column widths
+            sw_cont = max(max((len(f"{c:.0%}") for _, c in sustained), default=10), 10)  # "Continuity"
+            sw_span = max(max((len(f"{sum(1 for v in file_buckets[f] if v > 0)}/{num_buckets - file_first_seen.get(f, 0)}")
+                              for f, _ in sustained), default=6), 6)  # "Active"
+            sw_commits = max(max((len(str(file_commits[f])) for f, _ in sustained), default=7), 7)
+            sw_lines = max(max((len(str(file_total[f])) for f, _ in sustained), default=5), 5)
+            sw_file = max(max((len(f) + 2 for f, _ in sustained), default=4), 4)
+
+            print(f"| {'Continuity':>{sw_cont}} | {'Active':>{sw_span}} | {'Commits':>{sw_commits}} | {'Lines':>{sw_lines}} | {'File':<{sw_file}} |")
+            print(f"|{'-' * (sw_cont + 2)}|{'-' * (sw_span + 2)}|{'-' * (sw_commits + 2)}|{'-' * (sw_lines + 2)}|{'-' * (sw_file + 2)}|")
+            for f, cont in sustained:
+                first_b = file_first_seen.get(f, 0)
+                possible = num_buckets - first_b
+                active = sum(1 for val in file_buckets[f][first_b:] if val > 0)
+                cont_col = f"{cont:.0%}".rjust(sw_cont)
+                span_col = f"{active}/{possible}".rjust(sw_span)
+                commits_col = str(file_commits[f]).rjust(sw_commits)
+                lines_col = str(file_total[f]).rjust(sw_lines)
+                file_col = f"`{f}`".ljust(sw_file)
+                print(f"| {cont_col} | {span_col} | {commits_col} | {lines_col} | {file_col} |")
+
 
 # ── Dispatch ────────────────────────────────────────────────────────────────
 
