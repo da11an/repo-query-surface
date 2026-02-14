@@ -6,6 +6,7 @@ Single script, multiple render modes. Stdlib only.
 """
 
 import ast
+import fnmatch
 import json
 import math
 import os
@@ -2065,11 +2066,25 @@ def _auto_churn_bucket_size(commit_count):
     return bucket_size
 
 
+def _file_matches_filters(filename, include_globs, exclude_globs):
+    """Return True if filename passes include/exclude glob filters."""
+    if include_globs:
+        if not any(fnmatch.fnmatch(filename, g) for g in include_globs):
+            return False
+    if exclude_globs:
+        if any(fnmatch.fnmatch(filename, g) for g in exclude_globs):
+            return False
+    return True
+
+
 def render_churn(args):
     """Render file modification heatmap from git log --numstat output."""
     top_n = 20
     bucket_size = None
     bucket_auto = True
+    include_globs = []
+    exclude_globs = []
+    author_filters = []
     i = 0
     while i < len(args):
         if args[i] == "--top":
@@ -2087,6 +2102,15 @@ def render_churn(args):
                 bucket_size = parsed_bucket
                 bucket_auto = False
             i += 2
+        elif args[i] == "--include":
+            include_globs.append(args[i + 1])
+            i += 2
+        elif args[i] == "--exclude":
+            exclude_globs.append(args[i + 1])
+            i += 2
+        elif args[i] == "--author":
+            author_filters.append(args[i + 1].lower())
+            i += 2
         else:
             i += 1
 
@@ -2095,6 +2119,14 @@ def render_churn(args):
     if not commits:
         print("*(no commit history found)*")
         return
+
+    # Filter commits by author if requested
+    if author_filters:
+        commits = [c for c in commits
+                   if any(af in c.get("author", "").lower() for af in author_filters)]
+        if not commits:
+            print("*(no commits match the specified author filter)*")
+            return
 
     if bucket_size is None:
         bucket_size = _auto_churn_bucket_size(len(commits))
@@ -2118,6 +2150,8 @@ def render_churn(args):
         author_commits[author] += 1
         author_changes = 0
         for filename, changes in commit_files:
+            if not _file_matches_filters(filename, include_globs, exclude_globs):
+                continue
             file_buckets[filename][bucket_idx] += changes
             file_commits[filename] += 1
             file_total[filename] += changes
@@ -2127,6 +2161,10 @@ def render_churn(args):
     # Top N by total changes
     sorted_files = sorted(file_buckets.keys(),
                           key=lambda f: file_total[f], reverse=True)[:top_n]
+
+    if not sorted_files:
+        print("*(no files match the specified filters)*")
+        return
 
     # Global max for shade normalization
     global_max = max(
@@ -2142,6 +2180,16 @@ def render_churn(args):
     max_commits_w = max(max_commits_w, 7)  # at least "Commits"
     max_total_w = max(max_total_w, 5)  # at least "Lines"
 
+    # Build filter notes for description
+    filter_notes = []
+    if include_globs:
+        filter_notes.append(f"include: {', '.join(include_globs)}")
+    if exclude_globs:
+        filter_notes.append(f"exclude: {', '.join(exclude_globs)}")
+    if author_filters:
+        filter_notes.append(f"authors: {', '.join(author_filters)}")
+    filter_str = f" Filters: {'; '.join(filter_notes)}." if filter_notes else ""
+
     # Render
     print("## Churn")
     print(f"> {len(commits)} commits, {len(file_buckets)} files touched. "
@@ -2150,7 +2198,8 @@ def render_churn(args):
           f"History = per-file activity binned into {num_buckets} buckets "
           f"of {bucket_size} commits each (oldest \u2192 newest)"
           f"{' [auto-sized]' if bucket_auto else ''}, "
-          f"shaded by lines changed relative to the global max.")
+          f"shaded by lines changed relative to the global max."
+          f"{filter_str}")
     print()
     max_history_w = max(num_buckets + 2, 7)  # bar + backticks, at least "History"
     print(f"| {'Commits':>{max_commits_w}} | {'Lines':>{max_total_w}} | {'History':<{max_history_w}} | {'File':<{max_file_w}} |")

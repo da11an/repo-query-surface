@@ -595,9 +595,36 @@ test_churn() {
     output=$("$RQS" --repo "$FIXTURE_DIR" churn --top 2 2>&1)
     assert_contains "churn top-2 header" "$output" "## Churn"
 
+    # --include filter
+    output=$("$RQS" --repo "$FIXTURE_DIR" churn --include "src/*" 2>&1)
+    assert_contains "churn include has header" "$output" "## Churn"
+    assert_contains "churn include shows src file" "$output" "src/main.py"
+    assert_not_contains "churn include excludes lib" "$output" "lib/config.sh"
+    assert_contains "churn include filter note" "$output" "include: src/*"
+
+    # --exclude filter
+    output=$("$RQS" --repo "$FIXTURE_DIR" churn --exclude "*.py" 2>&1)
+    assert_contains "churn exclude has header" "$output" "## Churn"
+    assert_not_contains "churn exclude hides py files" "$output" "main.py"
+    assert_contains "churn exclude filter note" "$output" "exclude: *.py"
+
+    # --author filter (use git user.name from the fixture commit)
+    local fixture_author
+    fixture_author=$(cd "$FIXTURE_DIR" && git log --format="%an" -1)
+    output=$("$RQS" --repo "$FIXTURE_DIR" churn --author "$fixture_author" 2>&1)
+    assert_contains "churn author has header" "$output" "## Churn"
+    assert_contains "churn author filter note" "$output" "authors:"
+
+    # --author no match
+    output=$("$RQS" --repo "$FIXTURE_DIR" churn --author "nonexistent_author_xyz" 2>&1)
+    assert_contains "churn author no match" "$output" "no commits match"
+
     # Help
     output=$("$RQS" --repo "$FIXTURE_DIR" churn --help 2>&1)
     assert_contains "churn help" "$output" "Usage: rqs churn"
+    assert_contains "churn help include" "$output" "--include"
+    assert_contains "churn help exclude" "$output" "--exclude"
+    assert_contains "churn help author" "$output" "--author"
 }
 
 # ── Test: Notebook ──────────────────────────────────────────────────────────
