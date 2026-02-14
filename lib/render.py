@@ -2040,17 +2040,45 @@ def _parse_churn_log(content):
     return commits
 
 
+def _auto_churn_bucket_size(commit_count):
+    """Choose commits-per-bucket to target ~50 buckets (prefer 30-60 when possible)."""
+    if commit_count <= 0:
+        return 1
+    # For shorter histories, show per-commit resolution.
+    if commit_count <= 60:
+        return 1
+
+    # Start with a ~50-bucket target, then clamp to 30-60 bucket window.
+    bucket_size = max(1, round(commit_count / 50))
+    num_buckets = math.ceil(commit_count / bucket_size)
+    if num_buckets > 60:
+        bucket_size = max(1, math.ceil(commit_count / 60))
+    elif num_buckets < 30:
+        bucket_size = max(1, math.floor(commit_count / 30))
+    return bucket_size
+
+
 def render_churn(args):
     """Render file modification heatmap from git log --numstat output."""
     top_n = 20
-    bucket_size = 10
+    bucket_size = None
+    bucket_auto = True
     i = 0
     while i < len(args):
         if args[i] == "--top":
             top_n = int(args[i + 1])
             i += 2
         elif args[i] == "--bucket":
-            bucket_size = int(args[i + 1])
+            raw_bucket = args[i + 1].strip().lower()
+            if raw_bucket in {"", "auto"}:
+                bucket_size = None
+                bucket_auto = True
+            else:
+                parsed_bucket = int(raw_bucket)
+                if parsed_bucket <= 0:
+                    raise ValueError("bucket size must be positive")
+                bucket_size = parsed_bucket
+                bucket_auto = False
             i += 2
         else:
             i += 1
@@ -2060,6 +2088,10 @@ def render_churn(args):
     if not commits:
         print("*(no commit history found)*")
         return
+
+    if bucket_size is None:
+        bucket_size = _auto_churn_bucket_size(len(commits))
+        bucket_auto = True
 
     num_buckets = math.ceil(len(commits) / bucket_size)
 
@@ -2099,7 +2131,8 @@ def render_churn(args):
           f"Commits = number of commits that modified the file. "
           f"Lines = total lines added + deleted. "
           f"History = per-file activity binned into {num_buckets} buckets "
-          f"of {bucket_size} commits each (oldest \u2192 newest), "
+          f"of {bucket_size} commits each (oldest \u2192 newest)"
+          f"{' [auto-sized]' if bucket_auto else ''}, "
           f"shaded by lines changed relative to the global max.")
     print()
     max_history_w = max(num_buckets + 2, 7)  # bar + backticks, at least "History"
