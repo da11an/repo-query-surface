@@ -7,6 +7,7 @@ Single script, multiple render modes. Stdlib only.
 
 import ast
 import fnmatch
+from itertools import combinations
 import json
 import math
 import os
@@ -2085,6 +2086,7 @@ def render_churn(args):
     sort_mode = "lines"
     min_lines = 0
     min_continuity = 0.25
+    min_coupling = 0.30
     include_globs = []
     exclude_globs = []
     author_filters = []
@@ -2117,6 +2119,9 @@ def render_churn(args):
             i += 2
         elif args[i] == "--min-continuity":
             min_continuity = float(args[i + 1])
+            i += 2
+        elif args[i] == "--min-coupling":
+            min_coupling = float(args[i + 1])
             i += 2
         elif args[i] == "--include":
             include_globs.append(args[i + 1])
@@ -2159,6 +2164,8 @@ def render_churn(args):
     author_commits = Counter()
     author_total = Counter()
 
+    commit_file_sets = []  # per-commit sets of filtered filenames (for co-change)
+
     for ci, commit in enumerate(commits):
         bucket_idx = ci // bucket_size
         author = commit.get("author", "(unknown)")
@@ -2166,6 +2173,7 @@ def render_churn(args):
         author_buckets[author][bucket_idx] += 1
         author_commits[author] += 1
         author_changes = 0
+        commit_filtered = set()
         for filename, changes in commit_files:
             if not _file_matches_filters(filename, include_globs, exclude_globs):
                 continue
@@ -2175,7 +2183,9 @@ def render_churn(args):
             if filename not in file_first_seen:
                 file_first_seen[filename] = ci
             author_changes += changes
+            commit_filtered.add(filename)
         author_total[author] += author_changes
+        commit_file_sets.append(commit_filtered)
 
     # Filter by minimum lines, then sort and take top N
     eligible = file_buckets.keys()
@@ -2302,7 +2312,7 @@ def render_churn(args):
     if num_buckets >= 3 and file_first_seen:
         continuity = {}
         for f in file_buckets:
-            first_b = file_first_seen.get(f, 0)
+            first_b = file_first_seen.get(f, 0) // bucket_size
             possible = num_buckets - first_b
             if possible < 2:
                 continue
@@ -2324,7 +2334,7 @@ def render_churn(args):
 
             # Column widths
             sw_cont = max(max((len(f"{c:.0%}") for _, c in sustained), default=10), 10)  # "Continuity"
-            sw_span = max(max((len(f"{sum(1 for v in file_buckets[f] if v > 0)}/{num_buckets - file_first_seen.get(f, 0)}")
+            sw_span = max(max((len(f"{sum(1 for v in file_buckets[f] if v > 0)}/{num_buckets - file_first_seen.get(f, 0) // bucket_size}")
                               for f, _ in sustained), default=6), 6)  # "Active"
             sw_commits = max(max((len(str(file_commits[f])) for f, _ in sustained), default=7), 7)
             sw_lines = max(max((len(str(file_total[f])) for f, _ in sustained), default=5), 5)
@@ -2333,7 +2343,7 @@ def render_churn(args):
             print(f"| {'Continuity':>{sw_cont}} | {'Active':>{sw_span}} | {'Commits':>{sw_commits}} | {'Lines':>{sw_lines}} | {'File':<{sw_file}} |")
             print(f"|{'-' * (sw_cont + 2)}|{'-' * (sw_span + 2)}|{'-' * (sw_commits + 2)}|{'-' * (sw_lines + 2)}|{'-' * (sw_file + 2)}|")
             for f, cont in sustained:
-                first_b = file_first_seen.get(f, 0)
+                first_b = file_first_seen.get(f, 0) // bucket_size
                 possible = num_buckets - first_b
                 active = sum(1 for val in file_buckets[f][first_b:] if val > 0)
                 cont_col = f"{cont:.0%}".rjust(sw_cont)
@@ -2342,6 +2352,106 @@ def render_churn(args):
                 lines_col = str(file_total[f]).rjust(sw_lines)
                 file_col = f"`{f}`".ljust(sw_file)
                 print(f"| {cont_col} | {span_col} | {commits_col} | {lines_col} | {file_col} |")
+
+    # ── Co-change Clusters ──
+    # Find files that frequently change together using Jaccard similarity.
+    MAX_FILES_PER_COMMIT = 50  # skip mega-commits (refactors, renames)
+    MIN_CO_COMMITS = 2
+
+    co_count = Counter()
+    for file_set in commit_file_sets:
+        if len(file_set) < 2 or len(file_set) > MAX_FILES_PER_COMMIT:
+            continue
+        for pair in combinations(sorted(file_set), 2):
+            co_count[pair] += 1
+
+    # Compute Jaccard similarity for pairs meeting minimum co-commit threshold
+    edges = []
+    for (a, b), count in co_count.items():
+        if count < MIN_CO_COMMITS:
+            continue
+        jaccard = count / (file_commits[a] + file_commits[b] - count)
+        if jaccard >= min_coupling:
+            edges.append((a, b, jaccard, count))
+
+    if edges:
+        # Union-Find to form connected components
+        parent = {}
+
+        def _find(x):
+            while parent.get(x, x) != x:
+                parent[x] = parent.get(parent[x], parent[x])
+                x = parent[x]
+            return x
+
+        def _union(x, y):
+            px, py = _find(x), _find(y)
+            if px != py:
+                parent[px] = py
+
+        for a, b, _, _ in edges:
+            _union(a, b)
+
+        # Group files into clusters
+        clusters_map = defaultdict(set)
+        for a, b, _, _ in edges:
+            root = _find(a)
+            clusters_map[root].add(a)
+            clusters_map[root].add(b)
+
+        # Build edge lookup per cluster
+        cluster_edges = defaultdict(list)
+        for a, b, jaccard, count in edges:
+            cluster_edges[_find(a)].append((a, b, jaccard, count))
+
+        # Sort clusters: largest first, then by avg coupling desc
+        cluster_list = []
+        for root, members in clusters_map.items():
+            edge_list = cluster_edges[root]
+            avg_coupling = sum(j for _, _, j, _ in edge_list) / len(edge_list)
+            cluster_list.append((members, edge_list, avg_coupling))
+        cluster_list.sort(key=lambda x: (-len(x[0]), -x[2]))
+
+        print()
+        print("### Co-change Clusters")
+        print(f"> Files that frequently change together (Jaccard coupling >= {min_coupling:.0%}, "
+              f"min {MIN_CO_COMMITS} co-commits). Connected pairs form clusters.")
+
+        for ci, (members, edge_list, avg_coupling) in enumerate(cluster_list, 1):
+            # Sort members by commit count desc
+            sorted_members = sorted(members, key=lambda f: (-file_commits[f], f))
+            print()
+            print(f"**Cluster {ci}** ({len(members)} files, avg coupling {avg_coupling:.0%})")
+            print()
+
+            # Column widths
+            cw_commits = max(max((len(str(file_commits[f])) for f in sorted_members), default=7), 7)
+            cw_lines = max(max((len(str(file_total[f])) for f in sorted_members), default=5), 5)
+            cw_file = max(max((len(f) + 2 for f in sorted_members), default=4), 4)
+
+            print(f"| {'Commits':>{cw_commits}} | {'Lines':>{cw_lines}} | {'File':<{cw_file}} |")
+            print(f"|{'-' * (cw_commits + 2)}|{'-' * (cw_lines + 2)}|{'-' * (cw_file + 2)}|")
+            for f in sorted_members:
+                commits_col = str(file_commits[f]).rjust(cw_commits)
+                lines_col = str(file_total[f]).rjust(cw_lines)
+                file_col = f"`{f}`".ljust(cw_file)
+                print(f"| {commits_col} | {lines_col} | {file_col} |")
+
+            # Show top coupling pairs within the cluster
+            top_edges = sorted(edge_list, key=lambda e: (-e[2], -e[3]))[:10]
+            cw_coupling = max(len("Coupling"), max((len(f"{j:.0%}") for _, _, j, _ in top_edges), default=8))
+            cw_co = max(len("Co-commits"), max((len(str(c)) for _, _, _, c in top_edges), default=10))
+            cw_pair = max(len("File pair"),
+                         max((len(f"`{a}` ↔ `{b}`") for a, b, _, _ in top_edges), default=9))
+
+            print()
+            print(f"| {'Coupling':>{cw_coupling}} | {'Co-commits':>{cw_co}} | {'File pair':<{cw_pair}} |")
+            print(f"|{'-' * (cw_coupling + 2)}|{'-' * (cw_co + 2)}|{'-' * (cw_pair + 2)}|")
+            for a, b, jaccard, count in top_edges:
+                coupling_col = f"{jaccard:.0%}".rjust(cw_coupling)
+                co_col = str(count).rjust(cw_co)
+                pair_col = f"`{a}` ↔ `{b}`".ljust(cw_pair)
+                print(f"| {coupling_col} | {co_col} | {pair_col} |")
 
 
 # ── Dispatch ────────────────────────────────────────────────────────────────

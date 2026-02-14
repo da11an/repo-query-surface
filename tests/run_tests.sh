@@ -592,6 +592,8 @@ test_churn() {
     assert_contains "churn has author activity header" "$output" "| Author"
     # Sustained section requires >= 3 buckets; fixture has 1 commit so it should not appear
     assert_not_contains "churn no sustained for shallow history" "$output" "### Sustained Development"
+    # Co-change clusters require >= 2 co-commits; fixture has 1 commit so none
+    assert_not_contains "churn no clusters for shallow history" "$output" "### Co-change Clusters"
 
     # With options
     output=$("$RQS" --repo "$FIXTURE_DIR" churn --top 2 2>&1)
@@ -645,6 +647,39 @@ test_churn() {
     output=$("$RQS" --repo "$FIXTURE_DIR" churn --min-lines 999999 2>&1)
     assert_contains "churn min-lines no match" "$output" "no files match"
 
+    # Sustained continuity with bucket_size > 1 (regression: use bucket index, not commit index)
+    local churn_tmpdir
+    churn_tmpdir=$(mktemp -d)
+    (
+        cd "$churn_tmpdir"
+        git init -q
+        git config user.email "test@test.com"
+        git config user.name "Tester"
+        echo "v1" > app.py
+        echo "v1" > util.py
+        git add -A && git commit -q -m "c1"
+        echo "v2" >> app.py
+        git add -A && git commit -q -m "c2"
+        echo "v3" >> app.py
+        echo "v2" >> util.py
+        git add -A && git commit -q -m "c3"
+        echo "v4" >> app.py
+        git add -A && git commit -q -m "c4"
+        echo "v5" >> app.py
+        echo "v3" >> util.py
+        git add -A && git commit -q -m "c5"
+        echo "v6" >> app.py
+        git add -A && git commit -q -m "c6"
+    ) >/dev/null 2>&1
+    # 6 commits, bucket 2 → 3 buckets; app.py active in all 3 → continuity 100%
+    output=$("$RQS" --repo "$churn_tmpdir" churn --bucket 2 2>&1)
+    assert_contains "churn sustained with bucket>1" "$output" "### Sustained Development Files"
+    assert_contains "churn sustained shows app.py" "$output" "app.py"
+    # Active fraction denominator should be bucket count (3), not commit count
+    assert_contains "churn sustained bucket-index fraction" "$output" "/3"
+    assert_not_contains "churn sustained no commit-index fraction" "$output" "/6"
+    rm -rf "$churn_tmpdir"
+
     # Help
     output=$("$RQS" --repo "$FIXTURE_DIR" churn --help 2>&1)
     assert_contains "churn help" "$output" "Usage: rqs churn"
@@ -653,6 +688,7 @@ test_churn() {
     assert_contains "churn help author" "$output" "--author"
     assert_contains "churn help sort" "$output" "--sort"
     assert_contains "churn help min-lines" "$output" "--min-lines"
+    assert_contains "churn help min-coupling" "$output" "--min-coupling"
 }
 
 # ── Test: Notebook ──────────────────────────────────────────────────────────

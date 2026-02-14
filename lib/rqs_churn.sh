@@ -8,6 +8,7 @@ cmd_churn() {
     local sort_arg=""
     local min_lines_arg=""
     local min_continuity_arg=""
+    local min_coupling_arg=""
     local -a include_args=()
     local -a exclude_args=()
     local -a author_args=()
@@ -17,7 +18,7 @@ cmd_churn() {
             --help)
                 cat <<'EOF'
 Usage: rqs churn [rev-range] [--top N] [--bucket N|auto] [--sort MODE]
-                 [--min-lines N] [--min-continuity P]
+                 [--min-lines N] [--min-continuity P] [--min-coupling P]
                  [--include GLOB ...] [--exclude GLOB ...] [--author NAME ...]
 
 File modification heatmap showing change intensity over time.
@@ -30,6 +31,7 @@ Options:
   --sort MODE          Sort order: lines (default), commits, or init (first appearance)
   --min-lines N        Only show files with at least N total lines changed
   --min-continuity P   Minimum continuity for sustained files (default: 0.25)
+  --min-coupling P     Minimum Jaccard coupling for co-change clusters (default: 0.30)
   --include GLOB       Only include files matching glob (repeatable)
   --exclude GLOB       Exclude files matching glob (repeatable)
   --author NAME        Only include commits by author (repeatable, case-insensitive substring)
@@ -56,6 +58,7 @@ EOF
             --sort) sort_arg="$2"; shift 2 ;;
             --min-lines) min_lines_arg="$2"; shift 2 ;;
             --min-continuity) min_continuity_arg="$2"; shift 2 ;;
+            --min-coupling) min_coupling_arg="$2"; shift 2 ;;
             --include) include_args+=(--include "$2"); shift 2 ;;
             --exclude) exclude_args+=(--exclude "$2"); shift 2 ;;
             --author) author_args+=(--author "$2"); shift 2 ;;
@@ -76,8 +79,11 @@ EOF
     [[ -n "$min_lines_arg" ]] && min_lines_args=(--min-lines "$min_lines_arg")
     local -a min_cont_args=()
     [[ -n "$min_continuity_arg" ]] && min_cont_args=(--min-continuity "$min_continuity_arg")
+    local -a min_coup_args=()
+    [[ -n "$min_coupling_arg" ]] && min_coup_args=(--min-coupling "$min_coupling_arg")
 
     echo "$log_output" | rqs_render churn --top "$top_n" --bucket "$bucket" \
         "${sort_args[@]}" "${min_lines_args[@]}" "${min_cont_args[@]}" \
+        "${min_coup_args[@]}" \
         "${include_args[@]}" "${exclude_args[@]}" "${author_args[@]}"
 }
