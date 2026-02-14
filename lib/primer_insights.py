@@ -124,9 +124,15 @@ def is_text_candidate(rel_path: str) -> bool:
     return False
 
 
+def _is_fixture(rel: str) -> bool:
+    return "tests/fixtures/" in rel or rel.startswith("tests/fixtures/")
+
+
 def find_entrypoints(repo_root: str, files: Sequence[str], texts: Dict[str, str]) -> List[Entrypoint]:
     entrypoints: List[Entrypoint] = []
     for rel in files:
+        if _is_fixture(rel):
+            continue
         base = os.path.basename(rel)
         base_l = base.lower()
         ext = os.path.splitext(rel)[1].lower()
@@ -508,6 +514,8 @@ def build_critical_scores(
 
     scores: List[Tuple[str, float, Dict[str, float]]] = []
     for rel in files:
+        if _is_fixture(rel):
+            continue
         ext = os.path.splitext(rel)[1].lower()
         entry = 1.0 if rel in entry_set else 0.0
         dispatch = float(dispatch_targets.get(rel, 0))
@@ -559,11 +567,16 @@ def find_risk_hotspots(texts: Dict[str, str]) -> List[Tuple[str, int, str, str]]
 
     hotspots: List[Tuple[str, int, str, str]] = []
     for rel, text in texts.items():
-        if not text:
+        if not text or _is_fixture(rel):
             continue
         for idx, raw in enumerate(text.splitlines(), start=1):
             line = raw.strip()
             if not line:
+                continue
+            # Skip regex pattern definitions and their doc comments
+            if "re.compile" in line or "re.match" in line or "re.search" in line:
+                continue
+            if line.startswith("#") and any(kw in line.lower() for kw in ("fallback", "heuristic", "todo", "fixme")):
                 continue
             for label, regex in checks:
                 if regex.search(line):
@@ -577,14 +590,31 @@ def find_risk_hotspots(texts: Dict[str, str]) -> List[Tuple[str, int, str, str]]
     return hotspots
 
 
-def render_fast_start(
+def render_orientation(
     entrypoints: Sequence[Entrypoint],
     dispatch_entries: Sequence[DispatchEntry],
-    read_order: Sequence[Tuple[str, str]],
+    critical_scores: Sequence[Tuple[str, float, Dict[str, float]]],
 ) -> None:
-    _open_tag("fast_start_map")
-    print("## Fast Start Map")
-    print("> Deterministic onboarding map: likely entrypoints, dispatch surface, and a suggested first-read path.")
+    def print_table(headers: Sequence[str], rows: Sequence[Sequence[object]], right_align: Set[int] | None = None) -> None:
+        if right_align is None:
+            right_align = set()
+        widths = [len(h) for h in headers]
+        for row in rows:
+            for i, cell in enumerate(row):
+                widths[i] = max(widths[i], len(str(cell)))
+
+        def fmt_cell(col: int, value: object) -> str:
+            text = str(value)
+            return text.rjust(widths[col]) if col in right_align else text.ljust(widths[col])
+
+        print("| " + " | ".join(fmt_cell(i, h) for i, h in enumerate(headers)) + " |")
+        print("|-" + "-|-".join("-" * w for w in widths) + "-|")
+        for row in rows:
+            print("| " + " | ".join(fmt_cell(i, cell) for i, cell in enumerate(row)) + " |")
+
+    _open_tag("orientation")
+    print("## Orientation")
+    print("> Entrypoints, dispatch surface, and critical-path ranking.")
 
     print("\n**Likely entrypoints:**")
     if not entrypoints:
@@ -596,14 +626,13 @@ def render_fast_start(
             signals = ", ".join(ep.signals[:3]) if ep.signals else "heuristic"
             print(f"- `{ep.path}` (score {ep.score}; {signals})")
 
-    print("\n**Detected dispatch surface:**")
+    print("\n**Dispatch surface:**")
     if not dispatch_entries:
         print("- *(no explicit dispatch map detected)*")
         print("- The detector currently maps shell `case \"$...\"` style command routing and Python `argparse add_parser(...)` command tables.")
         print("- Implication: control flow may be framework/router-driven, config/plugin-driven, direct-call without a command router, or outside the currently parsed patterns.")
     else:
-        print("| Command | Entrypoint | Handler |")
-        print("|---------|------------|---------|")
+        dispatch_rows: List[Tuple[str, str, str]] = []
         for e in dispatch_entries[:20]:
             if e.source_file and e.handler:
                 handler = f"`{e.source_file}` -> `{e.handler}`"
@@ -613,15 +642,26 @@ def render_fast_start(
                 handler = f"`{e.handler}`"
             else:
                 handler = "*(not resolved)*"
-            print(f"| `{e.command}` | `{e.entry_file}` | {handler} |")
+            dispatch_rows.append((f"`{e.command}`", f"`{e.entry_file}`", handler))
+        print_table(("Command", "Entrypoint", "Handler"), dispatch_rows)
 
-    print("\n**Suggested first read order:**")
-    if not read_order:
-        print("- *(unable to derive read order)*")
-    else:
-        for idx, (path, reason) in enumerate(read_order[:10], start=1):
-            print(f"{idx}. `{path}` — {reason}")
-    _close_tag("fast_start_map")
+    if critical_scores:
+        print("\n**Critical path (ranked):**")
+        critical_rows: List[Tuple[int, str, str, str]] = []
+        for rank, (rel, score, comp) in enumerate(critical_scores[:10], start=1):
+            signals: List[str] = []
+            if comp["entry"] > 0:
+                signals.append("entrypoint")
+            if comp["dispatch"] > 0:
+                signals.append(f"dispatch x{int(comp['dispatch'])}")
+            if comp["fanin"] > 0:
+                signals.append(f"imported-by {int(comp['fanin'])}")
+            if comp["test"] > 0:
+                signals.append(f"test-touch {int(comp['test'])}")
+            signal_text = ", ".join(signals) if signals else "size/symbol density"
+            critical_rows.append((rank, f"`{rel}`", f"{score:.1f}", signal_text))
+        print_table(("#", "File", "Score", "Signals"), critical_rows, right_align={0, 2})
+    _close_tag("orientation")
 
 
 def render_runtime_boundaries(findings: Sequence[Tuple[str, List[Tuple[str, int, str]]]]) -> None:
@@ -666,33 +706,22 @@ def render_behavioral_contract(
     _close_tag("behavioral_contract")
 
 
-def render_critical_path(scores: Sequence[Tuple[str, float, Dict[str, float]]]) -> None:
-    _open_tag("critical_path_files")
-    print("## Critical Path Files")
-    print("> Heuristic centrality ranking using entrypoint/dispatch role, dependency fan-in, and test touch points.")
-    if not scores:
-        print("- *(no critical-path signals detected)*")
-        _close_tag("critical_path_files")
-        return
-
-    print("| File | Score | Signals |")
-    print("|------|------:|---------|")
-    for rel, score, comp in scores[:10]:
-        signals: List[str] = []
-        if comp["entry"] > 0:
-            signals.append("entrypoint")
-        if comp["dispatch"] > 0:
-            signals.append(f"dispatch x{int(comp['dispatch'])}")
-        if comp["fanin"] > 0:
-            signals.append(f"imported-by {int(comp['fanin'])}")
-        if comp["test"] > 0:
-            signals.append(f"test-touch {int(comp['test'])}")
-        signal_text = ", ".join(signals) if signals else "size/symbol density"
-        print(f"| `{rel}` | {score:.1f} | {signal_text} |")
-    _close_tag("critical_path_files")
-
 
 def render_risk_hotspots(hotspots: Sequence[Tuple[str, int, str, str]]) -> None:
+    def print_table(headers: Sequence[str], rows: Sequence[Sequence[object]]) -> None:
+        widths = [len(h) for h in headers]
+        for row in rows:
+            for i, cell in enumerate(row):
+                widths[i] = max(widths[i], len(str(cell)))
+
+        def fmt_cell(col: int, value: object) -> str:
+            return str(value).ljust(widths[col])
+
+        print("| " + " | ".join(fmt_cell(i, h) for i, h in enumerate(headers)) + " |")
+        print("|-" + "-|-".join("-" * w for w in widths) + "-|")
+        for row in rows:
+            print("| " + " | ".join(fmt_cell(i, cell) for i, cell in enumerate(row)) + " |")
+
     _open_tag("heuristic_risk_hotspots")
     print("## Heuristic Risk Hotspots")
     print("> Areas where behavior may be approximate, suppressed, or brittle under edge conditions.")
@@ -701,42 +730,10 @@ def render_risk_hotspots(hotspots: Sequence[Tuple[str, int, str, str]]) -> None:
         _close_tag("heuristic_risk_hotspots")
         return
 
-    print("| File | Signal | Snippet |")
-    print("|------|--------|---------|")
-    for rel, line, label, snippet in hotspots[:12]:
-        print(f"| `{rel}:{line}` | {label} | `{snippet}` |")
+    rows = [(f"`{rel}:{line}`", label, f"`{snippet}`") for rel, line, label, snippet in hotspots[:12]]
+    print_table(("File", "Signal", "Snippet"), rows)
     _close_tag("heuristic_risk_hotspots")
 
-
-def derive_read_order(
-    entrypoints: Sequence[Entrypoint],
-    dispatch_entries: Sequence[DispatchEntry],
-    critical_scores: Sequence[Tuple[str, float, Dict[str, float]]],
-    test_files: Sequence[str],
-) -> List[Tuple[str, str]]:
-    order: List[Tuple[str, str]] = []
-    seen: Set[str] = set()
-
-    def add(path: str, reason: str) -> None:
-        if not path or path in seen:
-            return
-        seen.add(path)
-        order.append((path, reason))
-
-    for ep in entrypoints[:3]:
-        add(ep.path, "entrypoint and control-flow root")
-
-    dispatch_sources = Counter(d.source_file for d in dispatch_entries if d.source_file)
-    for src, _count in dispatch_sources.most_common(5):
-        add(src, "direct dispatch target")
-
-    for rel, _score, _comp in critical_scores[:6]:
-        add(rel, "high criticality score")
-
-    for tf in test_files[:3]:
-        add(tf, "behavioral contract (tests)")
-
-    return order
 
 
 def main() -> None:
@@ -776,19 +773,19 @@ def main() -> None:
         edges=edges,
     )
 
-    read_order = derive_read_order(entrypoints, dispatch_entries, critical_scores, test_files)
     boundaries = find_runtime_boundaries(texts)
     hotspots = find_risk_hotspots(texts)
 
-    render_fast_start(entrypoints, dispatch_entries, read_order)
+    if args.level in {"medium", "heavy"}:
+        render_orientation(entrypoints, dispatch_entries, critical_scores)
+    else:
+        render_orientation(entrypoints, dispatch_entries, [])
     print("")
     render_runtime_boundaries(boundaries)
 
     if args.level in {"medium", "heavy"}:
         print("")
         render_behavioral_contract(test_files, test_case_count, assertion_count, command_hits)
-        print("")
-        render_critical_path(critical_scores)
 
     if args.level == "heavy":
         print("")

@@ -113,8 +113,8 @@ test_symbols() {
     assert_contains "symbols shows main function" "$output" "main"
     assert_contains "symbols header" "$output" "## Symbols"
     assert_contains "symbols has description" "$output" "Symbol index extracted via ctags"
-    assert_contains "symbols has Lines column" "$output" "| Lines |"
-    assert_contains "symbols has Signature column" "$output" "| Signature |"
+    assert_contains "symbols has Lines column" "$output" "| Lines"
+    assert_contains "symbols has Signature column" "$output" "| Signature"
     assert_contains "symbols shows line span" "$output" "8-24"
     assert_contains "symbols shows member" "$output" "Application.__init__"
     assert_contains "symbols shows signature" "$output" "(self, name)"
@@ -165,7 +165,7 @@ test_definition() {
     assert_contains "definition finds class" "$output" "src/main.py"
     assert_contains "definition header" "$output" "## Definition"
     assert_contains "definition has description" "$output" "Source locations where this symbol is defined"
-    assert_contains "definition has Lines column" "$output" "| Lines |"
+    assert_contains "definition has Lines column" "$output" "| Lines"
     assert_contains "definition shows line span" "$output" "8-24"
 }
 
@@ -223,10 +223,10 @@ test_primer() {
     output=$("$RQS" --repo "$FIXTURE_DIR" primer 2>&1)
     assert_contains "primer has repo name" "$output" "# Repository Primer"
     assert_contains "primer has prompt orientation" "$output" "# Repository Context Instructions"
-    assert_contains "primer has fast start map" "$output" "## Fast Start Map"
+    assert_contains "primer has orientation" "$output" "## Orientation"
     assert_contains "primer has runtime boundaries" "$output" "## Runtime Boundaries"
     assert_contains "primer has behavioral contract" "$output" "## Behavioral Contract (Tests)"
-    assert_contains "primer has critical path" "$output" "## Critical Path Files"
+    assert_contains "primer has critical path in orientation" "$output" "Critical path (ranked)"
     assert_contains "primer has tree" "$output" "## Tree"
     assert_contains "primer has symbols" "$output" "## Symbols"
     assert_contains "primer has module summaries" "$output" "## Module Summaries"
@@ -234,12 +234,13 @@ test_primer() {
     assert_not_contains "primer default has no task" "$output" "## Task:"
     assert_not_contains "primer default no signatures" "$output" "## Signatures"
     assert_not_contains "primer default no deps" "$output" "## Internal Dependencies"
+    assert_not_contains "primer default no critical path section" "$output" "## Critical Path Files"
 
     # Light: prompt + header + fast-start + boundaries + tree, no medium/heavy sections
     output=$("$RQS" --repo "$FIXTURE_DIR" primer --light 2>&1)
     assert_contains "primer light has prompt" "$output" "# Repository Context Instructions"
     assert_contains "primer light has repo name" "$output" "# Repository Primer"
-    assert_contains "primer light has fast start map" "$output" "## Fast Start Map"
+    assert_contains "primer light has orientation" "$output" "## Orientation"
     assert_contains "primer light has runtime boundaries" "$output" "## Runtime Boundaries"
     assert_contains "primer light has tree" "$output" "## Tree"
     assert_not_contains "primer light no behavioral contract" "$output" "## Behavioral Contract (Tests)"
@@ -250,22 +251,21 @@ test_primer() {
     # Heavy: everything including signatures + deps + heuristic hotspots
     output=$("$RQS" --repo "$FIXTURE_DIR" primer --heavy 2>&1)
     assert_contains "primer heavy has prompt" "$output" "# Repository Context Instructions"
-    assert_contains "primer heavy has fast start map" "$output" "## Fast Start Map"
+    assert_contains "primer heavy has orientation" "$output" "## Orientation"
     assert_contains "primer heavy has runtime boundaries" "$output" "## Runtime Boundaries"
     assert_contains "primer heavy has behavioral contract" "$output" "## Behavioral Contract (Tests)"
-    assert_contains "primer heavy has critical path" "$output" "## Critical Path Files"
+    assert_not_contains "primer heavy no separate critical path" "$output" "## Critical Path Files"
+    assert_contains "primer heavy has critical path in orientation" "$output" "Critical path (ranked)"
     assert_contains "primer heavy has tree" "$output" "## Tree"
-    assert_contains "primer heavy has symbols" "$output" "## Symbols"
-    assert_contains "primer heavy has signatures" "$output" "## Signatures"
+    assert_contains "primer heavy has symbol map" "$output" "## Symbol Map"
+    assert_not_contains "primer heavy no separate symbols" "$output" "## Symbols"
+    assert_not_contains "primer heavy no separate signatures" "$output" "## Signatures"
     assert_contains "primer heavy has deps" "$output" "## Internal Dependencies"
-    assert_contains "primer heavy deps summary" "$output" "Internal Python imports:"
-    assert_contains "primer heavy deps table header" "$output" "| Internal Module | Import Count | Imported By Files |"
-    assert_contains "primer heavy deps has fixture import" "$output" "| \`src.utils.helpers\` | 1 | 1 |"
     assert_contains "primer heavy has import topology" "$output" "## Import Topology"
-    assert_contains "primer heavy topology hubs" "$output" "### Top Hubs (Most Imported Files)"
-    assert_contains "primer heavy topology bridges" "$output" "### Top Bridges (Flow Centrality)"
+    assert_contains "primer heavy topology key files" "$output" "### Key Files"
     assert_contains "primer heavy topology layers" "$output" "### Layer Map (Foundation -> Orchestration)"
     assert_contains "primer heavy topology edge table" "$output" "| Importer | Imported | Layer Drop | Score |"
+    assert_contains "primer heavy has churn" "$output" "## Churn"
     assert_contains "primer heavy has hotspots" "$output" "## Heuristic Risk Hotspots"
 
     # Task flag
@@ -298,6 +298,7 @@ test_help() {
     assert_contains "help lists files" "$output" "files"
     assert_contains "help lists callees" "$output" "callees"
     assert_contains "help lists related" "$output" "related"
+    assert_contains "help lists churn" "$output" "churn"
     assert_contains "help lists notebook" "$output" "notebook"
 
     # Subcommand help
@@ -530,7 +531,7 @@ test_callees() {
     assert_contains "callees shows start" "$output" "start"
     assert_contains "callees finds validate_input" "$output" "validate_input"
     assert_contains "callees finds format_output" "$output" "format_output"
-    assert_contains "callees has table" "$output" "| Called Symbol |"
+    assert_contains "callees has table" "$output" "| Called Symbol"
 
     # main() calls Application and start
     output=$("$RQS" --repo "$FIXTURE_DIR" callees main 2>&1)
@@ -574,6 +575,27 @@ test_related() {
     # Error: no args
     assert_exit_code "related no args" 1 "$RQS" --repo "$FIXTURE_DIR" related
     assert_exit_code "related nonexistent" 1 "$RQS" --repo "$FIXTURE_DIR" related nonexistent.py
+}
+
+# ── Test: Churn ─────────────────────────────────────────────────────────────
+
+test_churn() {
+    echo "Testing: churn"
+
+    local output
+    output=$("$RQS" --repo "$FIXTURE_DIR" churn 2>&1)
+    assert_contains "churn header" "$output" "## Churn"
+    assert_contains "churn has description" "$output" "Lines = total lines added + deleted"
+    assert_contains "churn shows file" "$output" "src/main.py"
+    assert_contains "churn has table header" "$output" "| Commits"
+
+    # With options
+    output=$("$RQS" --repo "$FIXTURE_DIR" churn --top 2 2>&1)
+    assert_contains "churn top-2 header" "$output" "## Churn"
+
+    # Help
+    output=$("$RQS" --repo "$FIXTURE_DIR" churn --help 2>&1)
+    assert_contains "churn help" "$output" "Usage: rqs churn"
 }
 
 # ── Test: Notebook ──────────────────────────────────────────────────────────
@@ -741,6 +763,8 @@ echo ""
 test_callees
 echo ""
 test_related
+echo ""
+test_churn
 echo ""
 test_notebook
 echo ""

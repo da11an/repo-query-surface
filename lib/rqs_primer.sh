@@ -22,9 +22,9 @@ Usage: rqs primer [--light|--medium|--heavy] [--task TASK] [--tree-depth N] [--m
 Generate a tiered static primer for the repository.
 
 Tiers:
-  --light    Quick orientation: prompt + header + fast-start map + boundaries + tree
+  --light    Quick orientation: prompt + header + orientation + boundaries + tree
   --medium   Standard (default): light + test contract + critical path + symbols + module summaries
-  --heavy    Full sketch: medium + signatures + dependency wiring + heuristic hotspots
+  --heavy    Full sketch: module summaries + symbol map + dependency wiring + heuristic hotspots
 
 Options:
   --task TASK        Include task-specific framing (debug, feature, review, explain)
@@ -71,8 +71,8 @@ EOF
     rqs_list_files | rqs_render tree --depth "$tree_depth" --root "."
     echo ""
 
-    # ── Medium and heavy ──
-    if [[ "$level" == "medium" || "$level" == "heavy" ]]; then
+    # ── Medium only (not heavy) ──
+    if [[ "$level" == "medium" ]]; then
         # ── Symbol Index ──
         primer_symbol_index "$max_symbols"
         echo ""
@@ -84,13 +84,22 @@ EOF
 
     # ── Heavy only ──
     if [[ "$level" == "heavy" ]]; then
-        # ── Signatures (whole repo) ──
+        # ── Module Summaries ──
+        primer_module_summaries
+        echo ""
+
+        # ── Symbol Map (signatures with line spans, replaces both symbols + signatures) ──
         source "$RQS_LIB_DIR/rqs_signatures.sh"
-        cmd_signatures
+        rqs_list_files | grep -v '^tests/fixtures/' | rqs_render signatures --with-line-spans
         echo ""
 
         # ── Dependency Wiring ──
         primer_dependency_wiring
+        echo ""
+
+        # ── File Churn ──
+        source "$RQS_LIB_DIR/rqs_churn.sh"
+        cmd_churn --top "$RQS_CHURN_TOP_N" --bucket "$RQS_CHURN_BUCKET"
         echo ""
     fi
 
@@ -129,7 +138,7 @@ primer_symbol_index() {
 
     if rqs_has_ctags; then
         local tags_data
-	tags_data=$(rqs_list_files | while IFS= read -r f; do
+	tags_data=$(rqs_list_files | grep -v '^tests/fixtures/' | while IFS= read -r f; do
 	    (cd "$RQS_TARGET_REPO" && ctags $(rqs_ctags_args) -f - "$f" 2>/dev/null)
         done | head -n "$max_symbols") || true
 
@@ -224,7 +233,10 @@ primer_dependency_wiring() {
         all_files=$(rqs_list_files)
 
         if [[ -n "$all_files" ]]; then
-            local rows=""
+            local -a dep_files=()
+            local -a dep_imports=()
+            local max_file_w=4
+            local max_imports_w=7
             while IFS= read -r f; do
                 local ext="${f##*.}"
                 local abs="$RQS_TARGET_REPO/$f"
@@ -237,18 +249,30 @@ primer_dependency_wiring() {
                         sed -E 's/.*\s//' | sort -u || true)
                     if [[ -n "$sources" ]]; then
                         local deps_list
+                        local file_cell
+                        file_cell="\`$f\`"
                         deps_list=$(echo "$sources" | tr '\n' ', ' | sed 's/,$//')
-                        rows="${rows}| \`$f\` | $deps_list |\n"
+                        dep_files+=("$file_cell")
+                        dep_imports+=("$deps_list")
+                        (( ${#file_cell} > max_file_w )) && max_file_w=${#file_cell}
+                        (( ${#deps_list} > max_imports_w )) && max_imports_w=${#deps_list}
                     fi
                 fi
             done <<< "$all_files"
 
-            if [[ -z "$rows" ]]; then
+            if [[ ${#dep_files[@]} -eq 0 ]]; then
                 echo "*(no internal dependencies detected)*"
             else
-                echo "| File | Imports |"
-                echo "|------|---------|"
-                printf '%b' "$rows"
+                printf "| %-*s | %-*s |\n" "$max_file_w" "File" "$max_imports_w" "Imports"
+                printf "|-%s-|-%s-|\n" \
+                    "$(printf '%*s' "$max_file_w" '' | tr ' ' '-')" \
+                    "$(printf '%*s' "$max_imports_w" '' | tr ' ' '-')"
+                local i
+                for i in "${!dep_files[@]}"; do
+                    printf "| %-*s | %-*s |\n" \
+                        "$max_file_w" "${dep_files[$i]}" \
+                        "$max_imports_w" "${dep_imports[$i]}"
+                done
             fi
         else
             echo "*(no files to analyze)*"
@@ -272,6 +296,32 @@ try:
     top_n = max(1, int(sys.argv[3]))
 except ValueError:
     top_n = 50
+
+
+def render_table(headers, rows, right_align=None, pad_header=True):
+    if right_align is None:
+        right_align = set()
+
+    widths = [len(h) for h in headers]
+    for row in rows:
+        for i, cell in enumerate(row):
+            widths[i] = max(widths[i], len(str(cell)))
+
+    def _cell(i, value):
+        text = str(value)
+        return text.rjust(widths[i]) if i in right_align else text.ljust(widths[i])
+
+    if pad_header:
+        header_cells = [_cell(i, h) for i, h in enumerate(headers)]
+    else:
+        header_cells = [str(h) for h in headers]
+    header_row = "| " + " | ".join(header_cells) + " |"
+    sep_row = "|-" + "-|-".join("-" * w for w in widths) + "-|"
+    print(header_row)
+    print(sep_row)
+    for row in rows:
+        print("| " + " | ".join(_cell(i, c) for i, c in enumerate(row)) + " |")
+
 
 with os.fdopen(3) as py_stream:
     py_files = [line.strip() for line in py_stream if line.strip()]
@@ -432,26 +482,33 @@ ranked = sorted(counts.items(), key=lambda item: (-item[1], item[0]))
 unique_modules = len(ranked)
 total_edges = sum(counts.values())
 
-if unique_modules <= max_all:
-    shown = ranked
-    print(
-        f"> Internal Python imports: {unique_modules} modules, {total_edges} import edges. "
-        f"Showing all modules (<= {max_all})."
-    )
-else:
-    shown = ranked[:top_n]
-    print(
-        f"> Internal Python imports: {unique_modules} modules, {total_edges} import edges. "
-        f"Showing top {len(shown)} modules by import count."
-    )
-
-print("")
-print("| Internal Module | Import Count | Imported By Files |")
-print("|-----------------|--------------|-------------------|")
-for module, count in shown:
-    print(f"| `{module}` | {count} | {len(importers[module])} |")
-
 edge_count = sum(len(v) for v in adj.values())
+
+# Only show flat module table when there's no topology to display
+if edge_count == 0:
+    if unique_modules <= max_all:
+        shown = ranked
+        print(
+            f"> Internal Python imports: {unique_modules} modules, {total_edges} import edges. "
+            f"Showing all modules (<= {max_all})."
+        )
+    else:
+        shown = ranked[:top_n]
+        print(
+            f"> Internal Python imports: {unique_modules} modules, {total_edges} import edges. "
+            f"Showing top {len(shown)} modules by import count."
+        )
+
+    print("")
+    dep_rows = [
+        (f"`{module}`", count, len(importers[module]))
+        for module, count in shown
+    ]
+    render_table(
+        ["Internal Module", "Import Count", "Imported By Files"],
+        dep_rows,
+        right_align={1, 2},
+    )
 if edge_count == 0:
     print("")
     print("## Import Topology")
@@ -615,25 +672,27 @@ else:
 
 top_k = 10
 
-print("")
-print("### Top Hubs (Most Imported Files)")
-print("| File | Fan-In | Fan-Out | Layer |")
-print("|------|--------|---------|-------|")
-for f in sorted(nodes, key=lambda n: (-fan_in[n], -fan_out[n], n))[:top_k]:
-    print(f"| `{f}` | {fan_in[f]} | {fan_out[f]} | {file_layer[f]} |")
+# Unified key files table: rank by combined hub + bridge importance
+key_files_scored = sorted(
+    nodes,
+    key=lambda n: (-(fan_in[n] + fan_out[n] + betweenness[n]), n),
+)[:top_k]
 
 print("")
-print("### Top Bridges (Flow Centrality)")
+print("### Key Files")
 if bc_approx:
     print(
         f"> Betweenness centrality is approximated from {bc_sources} sampled source files."
     )
-print("| File | Bridge Score | Fan-In | Fan-Out | Layer |")
-print("|------|--------------|--------|---------|-------|")
-for f in sorted(nodes, key=lambda n: (-betweenness[n], -fan_in[n], n))[:top_k]:
-    print(
-        f"| `{f}` | {betweenness[f]:.2f} | {fan_in[f]} | {fan_out[f]} | {file_layer[f]} |"
-    )
+key_file_rows = [
+    (f"`{f}`", fan_in[f], fan_out[f], f"{betweenness[f]:.2f}", file_layer[f])
+    for f in key_files_scored
+]
+render_table(
+    ["File", "Fan-In", "Fan-Out", "Betweenness", "Layer"],
+    key_file_rows,
+    right_align={1, 2, 3, 4},
+)
 
 print("")
 print("### Layer Map (Foundation -> Orchestration)")
@@ -662,8 +721,6 @@ if omitted > 0:
 
 print("")
 print("### Key Dependency Links")
-print("| Importer | Imported | Layer Drop | Score |")
-print("|----------|----------|------------|-------|")
 edge_rows = []
 for src in nodes:
     for dst in adj[src]:
@@ -671,9 +728,17 @@ for src in nodes:
         score = (fan_out[src] + 1) * (fan_in[dst] + 1) * (max(layer_drop, 0) + 1)
         edge_rows.append((score, src, dst, layer_drop))
 
+link_rows = []
 for score, src, dst, layer_drop in sorted(
     edge_rows, key=lambda item: (-item[0], item[1], item[2])
 )[:12]:
-    print(f"| `{src}` | `{dst}` | {layer_drop} | {score} |")
+    link_rows.append((f"`{src}`", f"`{dst}`", layer_drop, score))
+
+render_table(
+    ["Importer", "Imported", "Layer Drop", "Score"],
+    link_rows,
+    right_align={2, 3},
+    pad_header=False,
+)
 PY
 }

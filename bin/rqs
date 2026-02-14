@@ -62,6 +62,8 @@ Commands:
   files <glob>                   List files matching a pattern
   callees <symbol>               Show what a function calls
   related <file>                 Show files connected to a file
+  churn [rev-range] [--top N] [--bucket N]
+                                 File modification heatmap
   primer [--light|--medium|--heavy] [--task TASK]
                                  Generate tiered static primer
   notebook <file> [--debug]      Extract structured content from .ipynb
@@ -173,6 +175,10 @@ case "$COMMAND" in
     prompt)
         source "$RQS_LIB_DIR/rqs_prompt.sh"
         cmd_prompt "$@"
+        ;;
+    churn)
+        source "$RQS_LIB_DIR/rqs_churn.sh"
+        cmd_churn "$@"
         ;;
     *)
         echo "error: unknown command '$COMMAND' (try 'rqs --help')" >&2

@@ -7,12 +7,13 @@ Single script, multiple render modes. Stdlib only.
 
 import ast
 import json
+import math
 import os
 import re
 import subprocess
 import sys
 import warnings
-from collections import defaultdict
+from collections import Counter, defaultdict
 
 
 def _xml_escape_attr(value):
@@ -287,12 +288,13 @@ def render_symbols(args):
     print(f"> Symbol index extracted via ctags — classes, functions, types grouped by file ({sym_count} symbols across {file_count} files). Request `rqs outline <file>` for hierarchy detail or `rqs signatures <file>` for full signatures.")
 
     for path in sorted(by_file.keys()):
-        syms = by_file[path]
+        syms = sorted(by_file[path], key=lambda x: x.get("line", 0))
         _open_tag("file", path=path)
         print(f"\n### `{path}`")
-        print("| Symbol | Kind | Lines | Signature |")
-        print("|--------|------|-------|-----------|")
-        for s in sorted(syms, key=lambda x: x.get("line", 0)):
+
+        # Pre-compute rows and column widths
+        rows = []
+        for s in syms:
             name = s.get("name", "?")
             kind = s.get("kind", "?")
             line = s.get("line", "?")
@@ -302,7 +304,21 @@ def render_symbols(args):
             if scope_info:
                 name = f"{scope_info}.{name}"
             lines_str = f"{line}-{end}" if end else str(line)
-            print(f"| `{name}` | {kind} | {lines_str} | `{sig}` |" if sig else f"| `{name}` | {kind} | {lines_str} | |")
+            rows.append((name, kind, lines_str, sig))
+
+        w_sym = max(max((len(r[0]) + 2 for r in rows), default=6), 6)   # "Symbol"
+        w_kind = max(max((len(r[1]) for r in rows), default=4), 4)      # "Kind"
+        w_lines = max(max((len(r[2]) for r in rows), default=5), 5)     # "Lines"
+        w_sig = max(max((len(r[3]) + 2 for r in rows if r[3]), default=9), 9)  # "Signature"
+
+        print(f"| {'Symbol':<{w_sym}} | {'Kind':<{w_kind}} | {'Lines':<{w_lines}} | {'Signature':<{w_sig}} |")
+        print(f"|{'-' * (w_sym + 2)}|{'-' * (w_kind + 2)}|{'-' * (w_lines + 2)}|{'-' * (w_sig + 2)}|")
+        for name, kind, lines_str, sig in rows:
+            sym_col = f"`{name}`".ljust(w_sym)
+            kind_col = kind.ljust(w_kind)
+            lines_col = lines_str.ljust(w_lines)
+            sig_col = f"`{sig}`".ljust(w_sig) if sig else " " * w_sig
+            print(f"| {sym_col} | {kind_col} | {lines_col} | {sig_col} |")
         _close_tag("file")
 
 
@@ -401,15 +417,28 @@ def render_definition(args):
 
     print(f"## Definition: `{symbol}`")
     print("> Source locations where this symbol is defined. Request `rqs slice <file> <start> <end>` to see the implementation, or `rqs references <symbol>` for usage.")
-    print("| File | Kind | Lines |")
-    print("|------|------|-------|")
+
+    # Pre-compute rows and column widths
+    rows = []
     for s in symbols:
         path = s.get("path", "?")
         kind = s.get("kind", "?")
         line = s.get("line", "?")
         end = s.get("end", "")
         lines_str = f"{line}-{end}" if end else str(line)
-        print(f"| `{path}` | {kind} | {lines_str} |")
+        rows.append((path, kind, lines_str))
+
+    w_file = max(max((len(r[0]) + 2 for r in rows), default=4), 4)   # "File"
+    w_kind = max(max((len(r[1]) for r in rows), default=4), 4)       # "Kind"
+    w_lines = max(max((len(r[2]) for r in rows), default=5), 5)      # "Lines"
+
+    print(f"| {'File':<{w_file}} | {'Kind':<{w_kind}} | {'Lines':<{w_lines}} |")
+    print(f"|{'-' * (w_file + 2)}|{'-' * (w_kind + 2)}|{'-' * (w_lines + 2)}|")
+    for path, kind, lines_str in rows:
+        file_col = f"`{path}`".ljust(w_file)
+        kind_col = kind.ljust(w_kind)
+        lines_col = lines_str.ljust(w_lines)
+        print(f"| {file_col} | {kind_col} | {lines_col} |")
 
 
 # ── References Rendering ───────────────────────────────────────────────────
@@ -632,7 +661,7 @@ def _is_direct_child_return(func_node, return_node):
     return False
 
 
-def _extract_signatures_from_file(filepath, source_lines, indent=""):
+def _extract_signatures_from_file(filepath, source_lines, indent="", with_spans=False):
     """Extract signatures from a parsed AST file."""
     try:
         source = "\n".join(source_lines)
@@ -642,10 +671,10 @@ def _extract_signatures_from_file(filepath, source_lines, indent=""):
     except SyntaxError:
         return [f"{indent}# (syntax error, could not parse)"]
 
-    return _extract_signatures_from_body(tree.body, source_lines, indent, is_module=True)
+    return _extract_signatures_from_body(tree.body, source_lines, indent, is_module=True, with_spans=with_spans)
 
 
-def _extract_signatures_from_body(body, source_lines, indent="", is_module=False):
+def _extract_signatures_from_body(body, source_lines, indent="", is_module=False, with_spans=False):
     """Extract signatures from a list of AST body nodes."""
     lines = []
 
@@ -667,7 +696,10 @@ def _extract_signatures_from_body(body, source_lines, indent="", is_module=False
             for dec in node.decorator_list:
                 lines.append(_reconstruct_decorator(dec, source_lines))
             # Class definition line
-            lines.append(_reconstruct_def_line(node, source_lines))
+            def_line = _reconstruct_def_line(node, source_lines)
+            if with_spans and hasattr(node, 'end_lineno') and node.end_lineno:
+                def_line += f"  # L{node.lineno}-{node.end_lineno}"
+            lines.append(def_line)
             # Class docstring
             doc = _get_docstring_first_line(node)
             if doc:
@@ -675,7 +707,7 @@ def _extract_signatures_from_body(body, source_lines, indent="", is_module=False
                 lines.append("")
             # Class body — recurse for methods
             method_lines = _extract_signatures_from_body(
-                node.body, source_lines, indent + "    "
+                node.body, source_lines, indent + "    ", with_spans=with_spans
             )
             if method_lines:
                 lines.extend(method_lines)
@@ -686,7 +718,10 @@ def _extract_signatures_from_body(body, source_lines, indent="", is_module=False
             for dec in node.decorator_list:
                 lines.append(_reconstruct_decorator(dec, source_lines))
             # Function definition line
-            lines.append(_reconstruct_def_line(node, source_lines))
+            def_line = _reconstruct_def_line(node, source_lines)
+            if with_spans and hasattr(node, 'end_lineno') and node.end_lineno:
+                def_line += f"  # L{node.lineno}-{node.end_lineno}"
+            lines.append(def_line)
             # Docstring
             doc = _get_docstring_first_line(node)
             if doc:
@@ -777,11 +812,15 @@ def render_signatures(args):
     repo_root = os.environ.get("RQS_TARGET_REPO", ".")
 
     scope = None
+    with_spans = False
     i = 0
     while i < len(args):
         if args[i] == "--scope":
             scope = args[i + 1]
             i += 2
+        elif args[i] == "--with-line-spans":
+            with_spans = True
+            i += 1
         else:
             i += 1
 
@@ -807,7 +846,7 @@ def render_signatures(args):
         except (OSError, UnicodeDecodeError):
             continue
 
-        sig_lines = _extract_signatures_from_file(filepath, source_lines)
+        sig_lines = _extract_signatures_from_file(filepath, source_lines, with_spans=with_spans)
 
         # Skip files with no meaningful signatures
         non_empty = [l for l in sig_lines if l.strip() and l.strip() != "..."]
@@ -839,9 +878,14 @@ def render_signatures(args):
         return
 
     # Print top-level header with description once
-    title = f"## Signatures: `{scope}`" if scope else "## Signatures"
-    print(title)
-    print("> Behavioral sketch: signatures, structure, and key details per file. Request `rqs slice <file> <start> <end>` to see full code.")
+    if with_spans:
+        title = f"## Symbol Map: `{scope}`" if scope else "## Symbol Map"
+        print(title)
+        print("> Symbols, signatures, and structure with line spans per file. Request `rqs slice <file> <start> <end>` to see full code.")
+    else:
+        title = f"## Signatures: `{scope}`" if scope else "## Signatures"
+        print(title)
+        print("> Behavioral sketch: signatures, structure, and key details per file. Request `rqs slice <file> <start> <end>` to see full code.")
 
     for filepath, sig_lines, lang in results:
         _open_tag("file", path=filepath, language=lang or "text")
@@ -1199,10 +1243,19 @@ def render_callees(args):
     print(f"> Functions and methods called by `{display_name}`. Request `rqs show <symbol>` to read any of them.")
 
     if resolved:
-        print("\n| Called Symbol | File | Kind | Line |")
-        print("|--------------|------|------|------|")
+        w_sym = max(max((len(r[0]) + 2 for r in resolved), default=13), 13)   # "Called Symbol"
+        w_file = max(max((len(r[1]) + 2 for r in resolved), default=4), 4)    # "File"
+        w_kind = max(max((len(r[2]) for r in resolved), default=4), 4)        # "Kind"
+        w_line = max(max((len(str(r[3])) for r in resolved), default=4), 4)   # "Line"
+
+        print(f"\n| {'Called Symbol':<{w_sym}} | {'File':<{w_file}} | {'Kind':<{w_kind}} | {'Line':>{w_line}} |")
+        print(f"|{'-' * (w_sym + 2)}|{'-' * (w_file + 2)}|{'-' * (w_kind + 2)}|{'-' * (w_line + 2)}|")
         for name, fpath, fkind, fline in resolved:
-            print(f"| `{name}` | `{fpath}` | {fkind} | {fline} |")
+            sym_col = f"`{name}`".ljust(w_sym)
+            file_col = f"`{fpath}`".ljust(w_file)
+            kind_col = fkind.ljust(w_kind)
+            line_col = str(fline).rjust(w_line)
+            print(f"| {sym_col} | {file_col} | {kind_col} | {line_col} |")
 
     if unresolved:
         print(f"\n**External/unresolved:** {', '.join(f'`{n}`' for n in unresolved)}")
@@ -1954,6 +2007,120 @@ def render_notebook_debug(args):
         print("\n".join(output_lines))
 
 
+# ── Churn Rendering ──────────────────────────────────────────────────────────
+
+
+SHADES = " \u2591\u2592\u2593\u2588"
+
+
+def _parse_churn_log(content):
+    """Parse git log --pretty=format:COMMIT --numstat into chronological commit list.
+
+    Returns a list of commits (oldest first), where each commit is a list of
+    (filename, changes) tuples.
+    """
+    commits = []
+    current = []
+    for line in content.splitlines():
+        if line == "COMMIT":
+            if current:
+                commits.append(current)
+            current = []
+        elif line.strip():
+            parts = line.split("\t")
+            if len(parts) >= 3 and parts[0] != "-":
+                try:
+                    changes = int(parts[0]) + int(parts[1])
+                    current.append((parts[2], changes))
+                except ValueError:
+                    pass
+    if current:
+        commits.append(current)
+    commits.reverse()  # git log is newest-first; we want chronological
+    return commits
+
+
+def render_churn(args):
+    """Render file modification heatmap from git log --numstat output."""
+    top_n = 20
+    bucket_size = 10
+    i = 0
+    while i < len(args):
+        if args[i] == "--top":
+            top_n = int(args[i + 1])
+            i += 2
+        elif args[i] == "--bucket":
+            bucket_size = int(args[i + 1])
+            i += 2
+        else:
+            i += 1
+
+    content = sys.stdin.read()
+    commits = _parse_churn_log(content)
+    if not commits:
+        print("*(no commit history found)*")
+        return
+
+    num_buckets = math.ceil(len(commits) / bucket_size)
+
+    # Aggregate per-file stats
+    file_buckets = defaultdict(lambda: [0] * num_buckets)
+    file_commits = Counter()
+    file_total = Counter()
+
+    for ci, commit_files in enumerate(commits):
+        bucket_idx = ci // bucket_size
+        for filename, changes in commit_files:
+            file_buckets[filename][bucket_idx] += changes
+            file_commits[filename] += 1
+            file_total[filename] += changes
+
+    # Top N by total changes
+    sorted_files = sorted(file_buckets.keys(),
+                          key=lambda f: file_total[f], reverse=True)[:top_n]
+
+    # Global max for shade normalization
+    global_max = max(
+        (file_buckets[f][b] for f in sorted_files for b in range(num_buckets)),
+        default=1,
+    ) or 1
+
+    # Pre-compute column widths for alignment
+    max_file_w = max((len(f) + 2 for f in sorted_files), default=4)  # +2 for backticks
+    max_commits_w = max((len(str(file_commits[f])) for f in sorted_files), default=1)
+    max_total_w = max((len(str(file_total[f])) for f in sorted_files), default=1)
+    max_file_w = max(max_file_w, 4)  # at least "File"
+    max_commits_w = max(max_commits_w, 7)  # at least "Commits"
+    max_total_w = max(max_total_w, 5)  # at least "Lines"
+
+    # Render
+    print("## Churn")
+    print(f"> {len(commits)} commits, {len(file_buckets)} files touched. "
+          f"Commits = number of commits that modified the file. "
+          f"Lines = total lines added + deleted. "
+          f"History = per-file activity binned into {num_buckets} buckets "
+          f"of {bucket_size} commits each (oldest \u2192 newest), "
+          f"shaded by lines changed relative to the global max.")
+    print()
+    max_history_w = max(num_buckets + 2, 7)  # bar + backticks, at least "History"
+    print(f"| {'Commits':>{max_commits_w}} | {'Lines':>{max_total_w}} | {'History':<{max_history_w}} | {'File':<{max_file_w}} |")
+    print(f"|{'-' * (max_commits_w + 2)}|{'-' * (max_total_w + 2)}|{'-' * (max_history_w + 2)}|{'-' * (max_file_w + 2)}|")
+    for f in sorted_files:
+        bar = ""
+        for val in file_buckets[f]:
+            if val == 0:
+                bar += SHADES[0]
+            else:
+                idx = min(len(SHADES) - 1,
+                          int((val / global_max) * (len(SHADES) - 2)) + 1)
+                bar += SHADES[idx]
+        history_col = f"`{bar}`".ljust(max_history_w)
+        file_col = f"`{f}`".ljust(max_file_w)
+        commits_col = str(file_commits[f]).rjust(max_commits_w)
+        total_col = str(file_total[f]).rjust(max_total_w)
+        print(f"| {commits_col} | {total_col} | {history_col} | {file_col} |")
+
+
 # ── Dispatch ────────────────────────────────────────────────────────────────
 
 
@@ -1977,6 +2144,7 @@ MODES = {
     "related": render_related,
     "notebook": render_notebook,
     "notebook-debug": render_notebook_debug,
+    "churn": render_churn,
 }
 
 

@@ -76,24 +76,24 @@ will run them and provide the output. Request everything you can anticipate need
 in a single response — each round trip is costly, so **batch related commands**
 rather than asking one at a time.
 
-| Command | When to use it |
-|---------|---------------|
-| `rqs tree <path> --depth N` | Explore directory structure |
-| `rqs symbols <file\|dir>` | Index symbols in a file or directory |
-| `rqs outline <file>` | See structural overview of a file |
-| `rqs signatures <file\|dir>` | See behavioral sketch: signatures, returns, docstrings |
-| `rqs slice <file> <start> <end>` | Read specific lines of code |
-| `rqs show <symbol> [symbol...]` | Extract full source of named symbols (batches multiple) |
-| `rqs context <file> <line>` | See enclosing function/class for a line number |
-| `rqs definition <symbol>` | Find where something is defined |
-| `rqs references <symbol>` | Find where something is used |
-| `rqs deps <file>` | See what a file imports and from where |
-| `rqs grep <pattern> --scope <dir>` | Search for a pattern |
-| `rqs diff [ref] [--staged]` | See git diff (working tree, staged, or vs a ref) |
-| `rqs files <glob>` | List files matching a pattern (e.g. `"*.py"`, `"*test*"`) |
-| `rqs callees <symbol>` | What does this function call? (outgoing edges) |
-| `rqs related <file>` | Files that import or are imported by this file |
-| `rqs notebook <file> [--debug]` | Extract notebook content; `--debug` for error analysis with traceback cross-referencing |
+| Command                                  | When to use it                                                            |
+|------------------------------------------|---------------------------------------------------------------------------|
+| `rqs tree <path> --depth N`              | Explore directory structure                                                |
+| `rqs symbols <file\|dir>`                | Index symbols in a file or directory                                      |
+| `rqs outline <file>`                     | See structural overview of a file                                         |
+| `rqs signatures <file\|dir>`             | See behavioral sketch: signatures, returns, docstrings                    |
+| `rqs slice <file> <start> <end>`         | Read specific lines of code                                               |
+| `rqs show <symbol> [symbol...]`          | Extract full source of named symbols (batches multiple)                   |
+| `rqs context <file> <line>`              | See enclosing function/class for a line number                            |
+| `rqs definition <symbol>`                | Find where something is defined                                           |
+| `rqs references <symbol>`                | Find where something is used                                              |
+| `rqs deps <file>`                        | See what a file imports and from where                                    |
+| `rqs grep <pattern> --scope <dir>`       | Search for a pattern                                                      |
+| `rqs diff [ref] [--staged]`              | See git diff (working tree, staged, or vs a ref)                          |
+| `rqs files <glob>`                       | List files matching a pattern (e.g. `"*.py"`, `"*test*"`)                 |
+| `rqs callees <symbol>`                   | What does this function call? (outgoing edges)                            |
+| `rqs related <file>`                     | Files that import or are imported by this file                            |
+| `rqs notebook <file> [--debug]`          | Extract notebook content; `--debug` for error analysis with traceback cross-referencing |
 
 Be targeted but not artificially minimal. If you know you'll need signatures and
 deps for the same module, or slices of three related functions, request them all at
