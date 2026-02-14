@@ -2084,6 +2084,7 @@ def render_churn(args):
     bucket_auto = True
     sort_mode = "lines"
     min_lines = 0
+    min_continuity = 0.25
     include_globs = []
     exclude_globs = []
     author_filters = []
@@ -2113,6 +2114,9 @@ def render_churn(args):
             i += 2
         elif args[i] == "--min-lines":
             min_lines = int(args[i + 1])
+            i += 2
+        elif args[i] == "--min-continuity":
+            min_continuity = float(args[i + 1])
             i += 2
         elif args[i] == "--include":
             include_globs.append(args[i + 1])
@@ -2306,7 +2310,7 @@ def render_churn(args):
             continuity[f] = active / possible
 
         sustained = sorted(
-            ((f, continuity[f]) for f in continuity if continuity[f] >= 0.4),
+            ((f, continuity[f]) for f in continuity if continuity[f] >= min_continuity),
             key=lambda x: (-x[1], -file_total[x[0]], x[0]),
         )
 
