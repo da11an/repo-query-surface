@@ -2082,6 +2082,7 @@ def render_churn(args):
     top_n = 20
     bucket_size = None
     bucket_auto = True
+    sort_mode = "lines"
     include_globs = []
     exclude_globs = []
     author_filters = []
@@ -2101,6 +2102,13 @@ def render_churn(args):
                     raise ValueError("bucket size must be positive")
                 bucket_size = parsed_bucket
                 bucket_auto = False
+            i += 2
+        elif args[i] == "--sort":
+            sort_mode = args[i + 1].strip().lower()
+            if sort_mode not in ("lines", "commits", "init"):
+                print(f"*(unknown sort mode '{sort_mode}'; use lines, commits, or init)*",
+                      file=sys.stderr)
+                sys.exit(1)
             i += 2
         elif args[i] == "--include":
             include_globs.append(args[i + 1])
@@ -2138,6 +2146,7 @@ def render_churn(args):
     file_buckets = defaultdict(lambda: [0] * num_buckets)
     file_commits = Counter()
     file_total = Counter()
+    file_first_seen = {}
     author_buckets = defaultdict(lambda: [0] * num_buckets)
     author_commits = Counter()
     author_total = Counter()
@@ -2155,12 +2164,22 @@ def render_churn(args):
             file_buckets[filename][bucket_idx] += changes
             file_commits[filename] += 1
             file_total[filename] += changes
+            if filename not in file_first_seen:
+                file_first_seen[filename] = ci
             author_changes += changes
         author_total[author] += author_changes
 
-    # Top N by total changes
-    sorted_files = sorted(file_buckets.keys(),
-                          key=lambda f: file_total[f], reverse=True)[:top_n]
+    # Sort and take top N
+    if sort_mode == "commits":
+        sorted_files = sorted(file_buckets.keys(),
+                              key=lambda f: (file_commits[f], file_total[f]),
+                              reverse=True)[:top_n]
+    elif sort_mode == "init":
+        sorted_files = sorted(file_buckets.keys(),
+                              key=lambda f: (file_first_seen.get(f, 0), f))[:top_n]
+    else:  # lines (default)
+        sorted_files = sorted(file_buckets.keys(),
+                              key=lambda f: file_total[f], reverse=True)[:top_n]
 
     if not sorted_files:
         print("*(no files match the specified filters)*")
@@ -2180,8 +2199,12 @@ def render_churn(args):
     max_commits_w = max(max_commits_w, 7)  # at least "Commits"
     max_total_w = max(max_total_w, 5)  # at least "Lines"
 
-    # Build filter notes for description
+    # Build filter/sort notes for description
     filter_notes = []
+    sort_labels = {"lines": "total lines changed", "commits": "commit count",
+                   "init": "first appearance (oldest first)"}
+    if sort_mode != "lines":
+        filter_notes.append(f"sorted by {sort_labels[sort_mode]}")
     if include_globs:
         filter_notes.append(f"include: {', '.join(include_globs)}")
     if exclude_globs:

@@ -619,12 +619,28 @@ test_churn() {
     output=$("$RQS" --repo "$FIXTURE_DIR" churn --author "nonexistent_author_xyz" 2>&1)
     assert_contains "churn author no match" "$output" "no commits match"
 
+    # --sort commits
+    output=$("$RQS" --repo "$FIXTURE_DIR" churn --sort commits 2>&1)
+    assert_contains "churn sort commits header" "$output" "## Churn"
+    assert_contains "churn sort commits note" "$output" "sorted by commit count"
+
+    # --sort init
+    output=$("$RQS" --repo "$FIXTURE_DIR" churn --sort init 2>&1)
+    assert_contains "churn sort init header" "$output" "## Churn"
+    assert_contains "churn sort init note" "$output" "sorted by first appearance"
+
+    # --sort lines (default, should not show sort note)
+    output=$("$RQS" --repo "$FIXTURE_DIR" churn --sort lines 2>&1)
+    assert_contains "churn sort lines header" "$output" "## Churn"
+    assert_not_contains "churn sort lines no sort note" "$output" "sorted by"
+
     # Help
     output=$("$RQS" --repo "$FIXTURE_DIR" churn --help 2>&1)
     assert_contains "churn help" "$output" "Usage: rqs churn"
     assert_contains "churn help include" "$output" "--include"
     assert_contains "churn help exclude" "$output" "--exclude"
     assert_contains "churn help author" "$output" "--author"
+    assert_contains "churn help sort" "$output" "--sort"
 }
 
 # ── Test: Notebook ──────────────────────────────────────────────────────────
