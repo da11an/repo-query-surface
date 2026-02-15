@@ -1,30 +1,25 @@
 #!/usr/bin/env bash
-# rqs_primer.sh — generate tiered static primer
+# rqs_primer.sh — generate static primer
 
 cmd_primer() {
     local tree_depth="$RQS_PRIMER_TREE_DEPTH"
     local max_symbols="$RQS_PRIMER_MAX_SYMBOLS"
-    local level="medium"
     local task=""
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --tree-depth) tree_depth="$2"; shift 2 ;;
             --max-symbols) max_symbols="$2"; shift 2 ;;
-            --light) level="light"; shift ;;
-            --medium) level="medium"; shift ;;
-            --heavy) level="heavy"; shift ;;
             --task) task="$2"; shift 2 ;;
             --help)
                 cat <<'EOF'
-Usage: rqs primer [--light|--medium|--heavy] [--task TASK] [--tree-depth N] [--max-symbols N]
+Usage: rqs primer [--task TASK] [--tree-depth N] [--max-symbols N]
 
-Generate a tiered static primer for the repository.
+Generate a static primer for the repository.
 
-Tiers:
-  --light    Quick orientation: prompt + header + orientation + boundaries + tree
-  --medium   Standard (default): light + test contract + critical path + symbols + module summaries
-  --heavy    Full sketch: module summaries + symbol map + dependency wiring + heuristic hotspots
+Includes: prompt orientation, onboarding context, churn heatmap,
+churn-informed budgeted tree, module summaries, symbol map,
+dependency wiring, and heuristic risk hotspots.
 
 Options:
   --task TASK        Include task-specific framing (debug, feature, review, explain)
@@ -42,7 +37,7 @@ EOF
     # ── Source dependencies ──
     source "$RQS_LIB_DIR/rqs_prompt.sh"
 
-    # ── Prompt orientation (all tiers) ──
+    # ── Prompt orientation ──
     if [[ -n "$task" ]]; then
         cmd_prompt "$task"
     else
@@ -55,53 +50,47 @@ EOF
     local repo_name
     repo_name=$(basename "$(readlink -f "$RQS_TARGET_REPO")")
 
-    # ── Header (all tiers) ──
+    # ── Header ──
     echo "# Repository Primer: \`${repo_name}\`"
     echo ""
 
     # Include README summary if available
     primer_readme_summary
 
-    # ── Deterministic onboarding context (all tiers, depth varies by level) ──
-    primer_strategy_context "$level"
+    # ── Deterministic onboarding context ──
+    primer_strategy_context "heavy"
     echo ""
 
-    # ── Tree (all tiers) ──
+    # ── File Churn (orientation first) ──
+    source "$RQS_LIB_DIR/rqs_churn.sh"
+    cmd_churn --top "$RQS_CHURN_TOP_N" --bucket "$RQS_CHURN_BUCKET"
     echo ""
-    rqs_list_files | rqs_render tree --depth "$tree_depth" --root "."
+
+    # ── Churn summary for tree importance scoring ──
+    local churn_tmp
+    churn_tmp=$(mktemp)
+    (cd "$RQS_TARGET_REPO" && git log --pretty=format:COMMIT%x09%an --numstat 2>&1) \
+        | rqs_render churn-summary > "$churn_tmp"
+
+    # ── Tree (churn-informed, budgeted) ──
+    rqs_list_files | rqs_render tree --depth "$tree_depth" --root "." \
+        --budget "${RQS_PRIMER_TREE_BUDGET:-50}" --churn-data "$churn_tmp"
     echo ""
 
-    # ── Medium only (not heavy) ──
-    if [[ "$level" == "medium" ]]; then
-        # ── Symbol Index ──
-        primer_symbol_index "$max_symbols"
-        echo ""
+    # ── Module Summaries ──
+    primer_module_summaries
+    echo ""
 
-        # ── Module Summaries ──
-        primer_module_summaries
-        echo ""
-    fi
+    # ── Symbol Map (signatures with line spans, budgeted) ──
+    source "$RQS_LIB_DIR/rqs_signatures.sh"
+    rqs_list_files | grep -v '^tests/fixtures/' | rqs_render signatures --with-line-spans \
+        --budget "${RQS_PRIMER_MAX_SYMBOLS:-500}" --churn-data "$churn_tmp"
+    echo ""
+    rm -f "$churn_tmp"
 
-    # ── Heavy only ──
-    if [[ "$level" == "heavy" ]]; then
-        # ── Module Summaries ──
-        primer_module_summaries
-        echo ""
-
-        # ── Symbol Map (signatures with line spans, replaces both symbols + signatures) ──
-        source "$RQS_LIB_DIR/rqs_signatures.sh"
-        rqs_list_files | grep -v '^tests/fixtures/' | rqs_render signatures --with-line-spans
-        echo ""
-
-        # ── Dependency Wiring ──
-        primer_dependency_wiring
-        echo ""
-
-        # ── File Churn ──
-        source "$RQS_LIB_DIR/rqs_churn.sh"
-        cmd_churn --top "$RQS_CHURN_TOP_N" --bucket "$RQS_CHURN_BUCKET"
-        echo ""
-    fi
+    # ── Dependency Wiring ──
+    primer_dependency_wiring
+    echo ""
 
     echo "</repository_primer>"
 }
@@ -130,26 +119,6 @@ primer_readme_summary() {
     if [[ -n "$summary" ]]; then
         echo "$summary"
         echo ""
-    fi
-}
-
-primer_symbol_index() {
-    local max_symbols="$1"
-
-    if rqs_has_ctags; then
-        local tags_data
-	tags_data=$(rqs_list_files | grep -v '^tests/fixtures/' | while IFS= read -r f; do
-	    (cd "$RQS_TARGET_REPO" && ctags $(rqs_ctags_args) -f - "$f" 2>/dev/null)
-        done | head -n "$max_symbols") || true
-
-        if [[ -n "$tags_data" ]]; then
-            echo "$tags_data" | rqs_render symbols --kinds "$RQS_SYMBOL_KINDS"
-        else
-            echo "*(no symbols found)*"
-        fi
-    else
-        echo "## Symbols"
-        echo "*(ctags not available — install universal-ctags for symbol indexing)*"
     fi
 }
 

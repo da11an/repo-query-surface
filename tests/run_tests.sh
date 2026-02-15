@@ -100,6 +100,73 @@ test_tree() {
     output=$("$RQS" --repo "$FIXTURE_DIR" tree src/)
     assert_contains "tree subpath shows main" "$output" "main.py"
     assert_contains "tree subpath shows utils" "$output" "utils/"
+
+    # ── Budgeted tree tests ──
+
+    # --budget header
+    output=$("$RQS" --repo "$FIXTURE_DIR" tree --budget 10)
+    assert_contains "tree budget header" "$output" "budget: 10 lines"
+
+    # Small budget shows collapsed dir annotation
+    output=$("$RQS" --repo "$FIXTURE_DIR" tree --budget 5)
+    # With a small budget, at least some dirs should be collapsed with file count
+    # The fixture has nested dirs, so at budget 5 some should show "(N files)"
+    local has_annotation
+    has_annotation=$(echo "$output" | grep -c "files)" || true)
+    if [[ "$has_annotation" -gt 0 ]]; then
+        PASS=$((PASS + 1))
+        echo "  PASS: tree budget=5 has collapsed annotation"
+    else
+        FAIL=$((FAIL + 1))
+        ERRORS="${ERRORS}\n  FAIL: tree budget=5 has collapsed annotation\n    expected collapsed dir with (N files)"
+        echo "  FAIL: tree budget=5 has collapsed annotation"
+    fi
+
+    # No --budget → backward compatible (no "budget:" in output)
+    output=$("$RQS" --repo "$FIXTURE_DIR" tree)
+    assert_not_contains "tree no-budget backward compat" "$output" "budget:"
+
+    # ── Churn-data integration test ──
+    local churn_tmpfile
+    churn_tmpfile=$(mktemp)
+    # Write synthetic churn JSON
+    cat > "$churn_tmpfile" <<'CHURN_JSON'
+{"src/main.py": {"commits": 100, "lines": 5000}, "src/utils/helpers.py": {"commits": 50, "lines": 2000}}
+CHURN_JSON
+    output=$("$RQS" --repo "$FIXTURE_DIR" tree --budget 8 --churn-data "$churn_tmpfile")
+    assert_contains "tree churn-data header" "$output" "churn-informed"
+    rm -f "$churn_tmpfile"
+
+    # ── Overflow test: repo with many files ──
+    local overflow_dir
+    overflow_dir=$(mktemp -d)
+    (
+        cd "$overflow_dir"
+        git init -q
+        git config user.email "test@test.com"
+        git config user.name "Tester"
+        for d in alpha bravo charlie delta echo foxtrot; do
+            mkdir -p "$d"
+            for n in $(seq 1 6); do
+                echo "line" > "$d/file${n}.txt"
+            done
+        done
+        git add -A && git commit -q -m "init"
+    ) >/dev/null 2>&1
+    output=$("$RQS" --repo "$overflow_dir" tree --budget 10)
+    assert_contains "tree overflow has collapsed dirs" "$output" "files)"
+    # Count tree body lines (between ``` markers)
+    local tree_lines
+    tree_lines=$(echo "$output" | sed -n '/^```$/,/^```$/p' | grep -v '^```$' | wc -l)
+    if [[ "$tree_lines" -le 12 ]]; then
+        PASS=$((PASS + 1))
+        echo "  PASS: tree overflow line count within budget ($tree_lines lines)"
+    else
+        FAIL=$((FAIL + 1))
+        ERRORS="${ERRORS}\n  FAIL: tree overflow line count within budget\n    expected <= 12 lines, got $tree_lines"
+        echo "  FAIL: tree overflow line count within budget ($tree_lines lines)"
+    fi
+    rm -rf "$overflow_dir"
 }
 
 # ── Test: Symbols ───────────────────────────────────────────────────────────
@@ -218,7 +285,7 @@ test_grep() {
 test_primer() {
     echo "Testing: primer"
 
-    # Default (medium) includes orientation + onboarding maps + tree + symbols + summaries
+    # Default primer includes all sections
     local output
     output=$("$RQS" --repo "$FIXTURE_DIR" primer 2>&1)
     assert_contains "primer has repo name" "$output" "# Repository Primer"
@@ -228,56 +295,50 @@ test_primer() {
     assert_contains "primer has behavioral contract" "$output" "## Behavioral Contract (Tests)"
     assert_contains "primer has critical path in orientation" "$output" "Critical path (ranked)"
     assert_contains "primer has tree" "$output" "## Tree"
-    assert_contains "primer has symbols" "$output" "## Symbols"
+    assert_contains "primer has churn" "$output" "## Churn"
+    assert_contains "primer has symbol map" "$output" "## Symbol Map"
     assert_contains "primer has module summaries" "$output" "## Module Summaries"
     assert_contains "primer summaries have symbols" "$output" "Application"
-    assert_not_contains "primer default has no task" "$output" "## Task:"
-    assert_not_contains "primer default no signatures" "$output" "## Signatures"
-    assert_not_contains "primer default no deps" "$output" "## Internal Dependencies"
-    assert_not_contains "primer default no critical path section" "$output" "## Critical Path Files"
+    assert_contains "primer has deps" "$output" "## Internal Dependencies"
+    assert_contains "primer has import topology" "$output" "## Import Topology"
+    assert_contains "primer topology key files" "$output" "### Key Files"
+    assert_contains "primer topology layers" "$output" "### Layer Map (Foundation -> Orchestration)"
+    assert_contains "primer topology edge table" "$output" "| Importer | Imported | Layer Drop | Score |"
+    assert_contains "primer has hotspots" "$output" "## Heuristic Risk Hotspots"
+    assert_not_contains "primer has no task by default" "$output" "## Task:"
+    assert_not_contains "primer no separate critical path section" "$output" "## Critical Path Files"
+    assert_not_contains "primer no separate symbols" "$output" "## Symbols"
+    assert_not_contains "primer no separate signatures" "$output" "## Signatures"
 
-    # Light: prompt + header + fast-start + boundaries + tree, no medium/heavy sections
-    output=$("$RQS" --repo "$FIXTURE_DIR" primer --light 2>&1)
-    assert_contains "primer light has prompt" "$output" "# Repository Context Instructions"
-    assert_contains "primer light has repo name" "$output" "# Repository Primer"
-    assert_contains "primer light has orientation" "$output" "## Orientation"
-    assert_contains "primer light has runtime boundaries" "$output" "## Runtime Boundaries"
-    assert_contains "primer light has tree" "$output" "## Tree"
-    assert_not_contains "primer light no behavioral contract" "$output" "## Behavioral Contract (Tests)"
-    assert_not_contains "primer light no critical path" "$output" "## Critical Path Files"
-    assert_not_contains "primer light no symbols" "$output" "## Symbols"
-    assert_not_contains "primer light no summaries" "$output" "## Module Summaries"
+    # ── Churn before tree ordering ──
+    local churn_line tree_line
+    churn_line=$(echo "$output" | grep -n "^## Churn" | head -1 | cut -d: -f1)
+    tree_line=$(echo "$output" | grep -n "^## Tree" | head -1 | cut -d: -f1)
+    if [[ -n "$churn_line" && -n "$tree_line" && "$churn_line" -lt "$tree_line" ]]; then
+        PASS=$((PASS + 1))
+        echo "  PASS: primer churn before tree"
+    else
+        FAIL=$((FAIL + 1))
+        ERRORS="${ERRORS}\n  FAIL: primer churn before tree\n    churn at line $churn_line, tree at line $tree_line"
+        echo "  FAIL: primer churn before tree"
+    fi
 
-    # Heavy: everything including signatures + deps + heuristic hotspots
-    output=$("$RQS" --repo "$FIXTURE_DIR" primer --heavy 2>&1)
-    assert_contains "primer heavy has prompt" "$output" "# Repository Context Instructions"
-    assert_contains "primer heavy has orientation" "$output" "## Orientation"
-    assert_contains "primer heavy has runtime boundaries" "$output" "## Runtime Boundaries"
-    assert_contains "primer heavy has behavioral contract" "$output" "## Behavioral Contract (Tests)"
-    assert_not_contains "primer heavy no separate critical path" "$output" "## Critical Path Files"
-    assert_contains "primer heavy has critical path in orientation" "$output" "Critical path (ranked)"
-    assert_contains "primer heavy has tree" "$output" "## Tree"
-    assert_contains "primer heavy has symbol map" "$output" "## Symbol Map"
-    assert_not_contains "primer heavy no separate symbols" "$output" "## Symbols"
-    assert_not_contains "primer heavy no separate signatures" "$output" "## Signatures"
-    assert_contains "primer heavy has deps" "$output" "## Internal Dependencies"
-    assert_contains "primer heavy has import topology" "$output" "## Import Topology"
-    assert_contains "primer heavy topology key files" "$output" "### Key Files"
-    assert_contains "primer heavy topology layers" "$output" "### Layer Map (Foundation -> Orchestration)"
-    assert_contains "primer heavy topology edge table" "$output" "| Importer | Imported | Layer Drop | Score |"
-    assert_contains "primer heavy has churn" "$output" "## Churn"
-    assert_contains "primer heavy has hotspots" "$output" "## Heuristic Risk Hotspots"
+    # Tree is budgeted and churn-informed
+    assert_contains "primer tree budgeted" "$output" "budget:"
+
+    # Symbol map is budgeted
+    assert_contains "primer symbol map budgeted" "$output" "Budgeted symbol map"
 
     # Task flag
     output=$("$RQS" --repo "$FIXTURE_DIR" primer --task debug 2>&1)
     assert_contains "primer task debug" "$output" "## Task: Debug"
     assert_contains "primer task debug has prompt" "$output" "# Repository Context Instructions"
 
-    # Light + task
-    output=$("$RQS" --repo "$FIXTURE_DIR" primer --light --task review 2>&1)
-    assert_contains "primer light+task has review" "$output" "## Task: Code Review"
-    assert_contains "primer light+task has tree" "$output" "## Tree"
-    assert_not_contains "primer light+task no symbols" "$output" "## Symbols"
+    # Task + primer still has all sections
+    output=$("$RQS" --repo "$FIXTURE_DIR" primer --task review 2>&1)
+    assert_contains "primer task review" "$output" "## Task: Code Review"
+    assert_contains "primer task review has tree" "$output" "## Tree"
+    assert_contains "primer task review has churn" "$output" "## Churn"
 }
 
 # ── Test: Help ──────────────────────────────────────────────────────────────
@@ -393,6 +454,106 @@ test_signatures() {
     fi
     assert_not_contains "signatures piped has no BrokenPipeError" "$output" "BrokenPipeError"
     assert_not_contains "signatures piped has no traceback" "$output" "Traceback (most recent call last)"
+
+    # ── Budgeted signatures tests ──
+
+    # --budget header contains "Budgeted symbol map"
+    output=$("$RQS" --repo "$FIXTURE_DIR" signatures --budget 50 2>&1)
+    assert_contains "signatures budget header" "$output" "Budgeted symbol map"
+    assert_contains "signatures budget files in detail" "$output" "files in detail"
+
+    # No --budget → backward compatible (no "Budgeted" in output)
+    output=$("$RQS" --repo "$FIXTURE_DIR" signatures 2>&1)
+    assert_not_contains "signatures no-budget backward compat" "$output" "Budgeted"
+
+    # --budget with --churn-data → output contains "churn-ranked"
+    local churn_sig_tmp
+    churn_sig_tmp=$(mktemp)
+    cat > "$churn_sig_tmp" <<'CHURN_JSON'
+{"src/main.py": {"commits": 100, "lines": 5000}, "src/utils/helpers.py": {"commits": 50, "lines": 2000}}
+CHURN_JSON
+    output=$("$RQS" --repo "$FIXTURE_DIR" signatures --budget 50 --churn-data "$churn_sig_tmp" 2>&1)
+    assert_contains "signatures churn-ranked" "$output" "churn-ranked"
+    # High-churn file appears in output
+    assert_contains "signatures churn high-churn file" "$output" "src/main.py"
+    rm -f "$churn_sig_tmp"
+
+    # ── Overflow test: many files, small budget ──
+    local sig_overflow_dir
+    sig_overflow_dir=$(mktemp -d)
+    (
+        cd "$sig_overflow_dir"
+        git init -q
+        git config user.email "test@test.com"
+        git config user.name "Tester"
+        mkdir -p pkg
+        for n in $(seq 1 20); do
+            cat > "pkg/mod${n}.py" <<PYEOF
+class Widget${n}:
+    pass
+
+def process_${n}(data):
+    return data
+
+def transform_${n}(x, y):
+    return x + y
+
+def validate_${n}(item):
+    return True
+PYEOF
+        done
+        git add -A && git commit -q -m "init"
+    ) >/dev/null 2>&1
+    output=$("$RQS" --repo "$sig_overflow_dir" signatures --budget 30 2>&1)
+    assert_contains "signatures overflow has budget header" "$output" "Budgeted symbol map"
+    # Count total output lines (budget + overhead tolerance)
+    local sig_lines
+    sig_lines=$(echo "$output" | wc -l)
+    if [[ "$sig_lines" -le 40 ]]; then
+        PASS=$((PASS + 1))
+        echo "  PASS: signatures overflow within budget ($sig_lines lines)"
+    else
+        FAIL=$((FAIL + 1))
+        ERRORS="${ERRORS}\n  FAIL: signatures overflow within budget\n    expected <= 40 lines, got $sig_lines"
+        echo "  FAIL: signatures overflow within budget ($sig_lines lines)"
+    fi
+    rm -rf "$sig_overflow_dir"
+
+    # ── Catalog format test ──
+    # Small budget with multiple files → shows catalog or detail indicator
+    output=$("$RQS" --repo "$FIXTURE_DIR" signatures --budget 20 2>&1)
+    assert_contains "signatures small budget detail indicator" "$output" "files in detail"
+
+    # ── Span prioritization test ──
+    # Large-span function at end of file should surface before small ones
+    local span_dir
+    span_dir=$(mktemp -d)
+    (
+        cd "$span_dir"
+        git init -q
+        git config user.email "test@test.com"
+        git config user.name "Tester"
+        # 10 small functions (2 lines each), then one large class (many methods)
+        {
+            for n in $(seq 1 10); do
+                echo "def tiny_${n}():"
+                echo "    pass"
+                echo ""
+            done
+            echo "class BigDispatcher:"
+            echo '    """The main dispatcher."""'
+            for n in $(seq 1 8); do
+                echo "    def handle_${n}(self, data):"
+                echo "        return data"
+                echo ""
+            done
+        } > big.py
+        git add -A && git commit -q -m "init"
+    ) >/dev/null 2>&1
+    output=$("$RQS" --repo "$span_dir" signatures --budget 80 2>&1)
+    # BigDispatcher has the largest block (class + methods), surfaces first
+    assert_contains "signatures span-priority surfaces large block" "$output" "BigDispatcher"
+    rm -rf "$span_dir"
 }
 
 # ── Test: Show ─────────────────────────────────────────────────────────────
@@ -680,6 +841,57 @@ test_churn() {
     assert_not_contains "churn sustained no commit-index fraction" "$output" "/6"
     rm -rf "$churn_tmpdir"
 
+    # ── Sustained development budget test ──
+    # Generate synthetic git log: 100 files each appearing in commits 0 and 1,
+    # so all have possible>=2. 4 commits total, bucket=1.
+    # Commits touch 1 file each to avoid co-change explosion.
+    local synth_log
+    synth_log=$(python3 -c "
+# Commit 0: files 0-99 (all files first appear here)
+print('COMMIT\tTester')
+for n in range(100):
+    print(f'10\t5\tfile{n}.py')
+# Commits 1-3: each touches all 100 files again (1 file per line, no co-change issue
+# since MAX_FILES_PER_COMMIT=50 skips these for clustering)
+for c in range(1, 4):
+    print('COMMIT\tTester')
+    for n in range(100):
+        print(f'10\t5\tfile{n}.py')
+")
+    output=$(echo "$synth_log" | python3 "$RQS_ROOT/lib/render.py" churn --bucket 1 --min-continuity 0 --top 20 2>&1)
+    assert_contains "churn sustained budget has section" "$output" "### Sustained Development Files"
+    # Should show "showing X of Y" since 100 files > 94-row budget
+    assert_contains "churn sustained budget truncated" "$output" "showing 94 of 100"
+
+    # ── Churn-summary mode test ──
+    local churn_summary_output
+    churn_summary_output=$(cd "$FIXTURE_DIR" && git log --pretty=format:COMMIT%x09%an --numstat 2>&1 \
+        | python3 "$RQS_ROOT/lib/render.py" churn-summary)
+    # Should be valid JSON with commits and lines keys
+    local is_valid_json
+    is_valid_json=$(echo "$churn_summary_output" | python3 -c "
+import json, sys
+try:
+    d = json.load(sys.stdin)
+    assert isinstance(d, dict)
+    for v in d.values():
+        assert 'commits' in v and 'lines' in v
+    print('yes')
+except:
+    print('no')
+" 2>&1)
+    if [[ "$is_valid_json" == "yes" ]]; then
+        PASS=$((PASS + 1))
+        echo "  PASS: churn-summary produces valid JSON"
+    else
+        FAIL=$((FAIL + 1))
+        ERRORS="${ERRORS}\n  FAIL: churn-summary produces valid JSON\n    got: $churn_summary_output"
+        echo "  FAIL: churn-summary produces valid JSON"
+    fi
+    # No XML wrapper tags
+    assert_not_contains "churn-summary no xml open tag" "$churn_summary_output" "<churn-summary>"
+    assert_not_contains "churn-summary no xml close tag" "$churn_summary_output" "</churn-summary>"
+
     # Help
     output=$("$RQS" --repo "$FIXTURE_DIR" churn --help 2>&1)
     assert_contains "churn help" "$output" "Usage: rqs churn"
@@ -801,6 +1013,97 @@ test_notebook_debug() {
     assert_contains "debug in help" "$output" "--debug"
 }
 
+# ── Test: Primer Insights (entrypoints, test detection) ────────────────────
+
+test_primer_insights() {
+    echo "Testing: primer insights"
+
+    # Create a repo with C main(), CI scripts, Lua tests, and test/ dir
+    local insights_dir
+    insights_dir=$(mktemp -d)
+    (
+        cd "$insights_dir"
+        git init -q
+        git config user.email "test@test.com"
+        git config user.name "Tester"
+
+        # Runtime entrypoint: C main() and internal include graph
+        mkdir -p src/app
+        cat > src/app/core.h <<'HEOF'
+#pragma once
+int core_add(int a, int b);
+HEOF
+        cat > src/app/core.c <<'CCEOF'
+#include "core.h"
+int core_add(int a, int b) {
+    return a + b;
+}
+CCEOF
+        cat > src/app/main.c <<'CEOF'
+#include <stdio.h>
+#include "core.h"
+int main(int argc, char *argv[]) {
+    printf("sum=%d\n", core_add(1, 1));
+    return 0;
+}
+CEOF
+
+        # CI script (should be demoted)
+        mkdir -p .github/workflows
+        cat > .github/workflows/ci.sh <<'SHEOF'
+#!/bin/bash
+set -euo pipefail
+case "$1" in
+    build) make ;;
+    test) make test ;;
+esac
+SHEOF
+        chmod +x .github/workflows/ci.sh
+
+        # Lua test files in test/ (no 's')
+        mkdir -p test/functional
+        cat > test/functional/eval_spec.lua <<'LUAEOF'
+local helpers = require('test.helpers')
+describe('eval', function()
+    it('evaluates expressions', function()
+        local result = eval('1+1')
+        eq(2, result)
+    end)
+    it('handles errors', function()
+        ok(false)
+    end)
+end)
+LUAEOF
+
+        git add -A && git commit -q -m "init"
+    ) >/dev/null 2>&1
+
+    local output
+    output=$("$RQS" --repo "$insights_dir" primer 2>&1)
+
+    # C main.c should appear as entrypoint
+    assert_contains "insights c-main entrypoint" "$output" "src/app/main.c"
+    assert_contains "insights c-main signal" "$output" "c-main"
+    # C include graph should contribute fan-in for core.h
+    assert_contains "insights c include target in critical path" "$output" "src/app/core.h"
+    assert_contains "insights c include fanin signal" "$output" "imported-by 2"
+
+    # CI script should not appear in entrypoints section
+    local entrypoints_section
+    entrypoints_section=$(echo "$output" | sed -n '/Likely entrypoints/,/Dispatch surface/p')
+    assert_not_contains "insights ci not in entrypoints" "$entrypoints_section" ".github/workflows/ci.sh"
+
+    # Lua test files should be detected
+    # Behavioral Contract should show more than 0/1 test files
+    assert_contains "insights lua tests detected" "$output" "Test files detected"
+    # Should find the it() test cases
+    assert_contains "insights lua test cases" "$output" "Named test cases detected: 2"
+    # Should find eq/ok assertions
+    assert_contains "insights lua assertions" "$output" "Assertion-like checks detected"
+
+    rm -rf "$insights_dir"
+}
+
 # ── Test: Error Handling ────────────────────────────────────────────────────
 
 test_errors() {
@@ -862,6 +1165,8 @@ echo ""
 test_notebook
 echo ""
 test_notebook_debug
+echo ""
+test_primer_insights
 echo ""
 test_errors
 

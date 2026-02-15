@@ -43,6 +43,18 @@ def _close_tag(tag):
     print(f"</{tag}>")
 
 
+def _strip_git_quote(path):
+    """Strip surrounding quotes that git adds for paths with special chars."""
+    if len(path) >= 2 and path[0] == '"' and path[-1] == '"':
+        return path[1:-1]
+    return path
+
+
+def _read_file_list():
+    """Read a file list from stdin, stripping whitespace and git quotes."""
+    return [_strip_git_quote(line.strip()) for line in sys.stdin if line.strip()]
+
+
 # ── Tree Rendering ──────────────────────────────────────────────────────────
 
 
@@ -90,9 +102,459 @@ def render_tree_lines(tree, dirs, prefix="", path_prefix="", line_counts=None):
     return lines
 
 
+def _count_files_in_subtree(tree, dirs, path_prefix):
+    """Count total files (non-directory leaves) in a subtree."""
+    count = 0
+    for name, children in tree.items():
+        node_path = f"{path_prefix}/{name}" if path_prefix else name
+        is_dir = children or node_path in dirs
+        if is_dir:
+            count += _count_files_in_subtree(children, dirs, node_path)
+        else:
+            count += 1
+    return count
+
+
+def _collect_files_in_subtree(tree, dirs, path_prefix):
+    """Collect all file paths in a subtree."""
+    files = []
+    for name, children in tree.items():
+        node_path = f"{path_prefix}/{name}" if path_prefix else name
+        is_dir = children or node_path in dirs
+        if is_dir:
+            files.extend(_collect_files_in_subtree(children, dirs, node_path))
+        else:
+            files.append(node_path)
+    return files
+
+
+def compute_subtree_stats(tree, dirs, path_prefix, line_counts, churn_data):
+    """Compute per-directory aggregate stats for importance scoring.
+
+    Returns {dir_path: {file_count, total_loc, churn_commits, churn_lines,
+                        hot_count, hot_files, direct_children, importance}}.
+    """
+    stats = {}
+    for name, children in tree.items():
+        node_path = f"{path_prefix}/{name}" if path_prefix else name
+        is_dir = children or node_path in dirs
+        if not is_dir:
+            continue
+
+        # Recurse into children first
+        child_stats = compute_subtree_stats(children, dirs, node_path, line_counts, churn_data)
+        stats.update(child_stats)
+
+        # Aggregate for this directory
+        all_files = _collect_files_in_subtree(children, dirs, node_path)
+        file_count = len(all_files)
+        total_loc = sum(line_counts.get(f, 0) for f in all_files)
+        direct_children = len(children)
+
+        churn_commits = 0
+        churn_lines = 0
+        hot_count = 0
+        hot_files = []
+        if churn_data:
+            for f in all_files:
+                cd = churn_data.get(f)
+                if cd:
+                    churn_commits += cd.get("commits", 0)
+                    churn_lines += cd.get("lines", 0)
+                    hot_count += 1
+                    hot_files.append((f, cd.get("lines", 0)))
+            hot_files.sort(key=lambda x: -x[1])
+
+        importance = _compute_importance(
+            file_count, total_loc, churn_lines, hot_count,
+            has_churn=churn_data is not None
+        )
+
+        stats[node_path] = {
+            "file_count": file_count,
+            "total_loc": total_loc,
+            "churn_commits": churn_commits,
+            "churn_lines": churn_lines,
+            "hot_count": hot_count,
+            "hot_files": hot_files,
+            "direct_children": direct_children,
+            "importance": importance,
+        }
+
+    return stats
+
+
+def _compute_importance(file_count, total_loc, churn_lines, hot_count, has_churn):
+    """Score a directory's importance for expansion priority."""
+    if has_churn:
+        return (0.4 * math.log2(1 + file_count)
+                + 0.2 * math.log2(1 + total_loc / 100)
+                + 0.25 * math.log2(1 + churn_lines / 100)
+                + 0.15 * math.log2(1 + hot_count))
+    else:
+        return (0.5 * math.log2(1 + file_count)
+                + 0.5 * math.log2(1 + total_loc / 100))
+
+
+def _file_symbol_importance(loc, churn_commits, churn_lines, has_churn):
+    """Score a file's importance for symbol map prioritization."""
+    if has_churn:
+        return (0.25 * math.log2(1 + loc / 100)
+                + 0.40 * math.log2(1 + churn_lines / 100)
+                + 0.35 * math.log2(1 + churn_commits))
+    else:
+        return math.log2(1 + loc / 100)
+
+
+def _format_catalog_entry(filepath, sig_lines, lang, loc):
+    """Format a file's signatures as a single compact catalog line.
+
+    Extracts symbol names from signature output and shows top 5.
+    """
+    symbols = []
+    for line in sig_lines:
+        line = line.strip()
+        if not line or line.startswith("#") or line == "...":
+            continue
+        # Python AST format: "def name(...)  # L10-20" or "class Name:  # L5-30"
+        m = re.match(r'(?:async\s+)?(?:def|class)\s+(\w+)', line)
+        if m:
+            # Extract line number from "# L10-20" or "# L10"
+            lm = re.search(r'#\s*L(\d+)', line)
+            ln = lm.group(1) if lm else ""
+            symbols.append((m.group(1), ln, line.strip()))
+            continue
+        # ctags format: "kind: name [L10]" or "kind: name(sig) [L10-20]"
+        m = re.match(r'\s*(\w+):\s+(\w+)', line)
+        if m:
+            kind = m.group(1)
+            name = m.group(2)
+            lm = re.search(r'\[L(\d+)', line)
+            ln = lm.group(1) if lm else ""
+            symbols.append((name, ln, kind))
+            continue
+
+    if not symbols:
+        return f"- `{filepath}` — {loc}L"
+
+    # Show top 5 symbols
+    shown = symbols[:5]
+    parts = []
+    for name, ln, _ in shown:
+        if ln:
+            parts.append(f"{name} (L{ln})")
+        else:
+            parts.append(name)
+    text = ", ".join(parts)
+    if len(symbols) > 5:
+        text += f" +{len(symbols) - 5} more"
+    return f"- `{filepath}`: {text} — {loc}L"
+
+
+def _count_symbols_in_lines(sig_lines):
+    """Count meaningful symbol definitions in signature output lines."""
+    count = 0
+    for line in sig_lines:
+        line = line.strip()
+        if not line or line.startswith("#") or line == "...":
+            continue
+        # Python AST: def/class lines
+        if re.match(r'(?:async\s+)?(?:def|class)\s+\w+', line):
+            count += 1
+            continue
+        # ctags: kind: name
+        if re.match(r'\s*\w+:\s+\w+', line):
+            count += 1
+    return count
+
+
+def _prioritize_by_span(sig_lines, cap):
+    """Reorder top-level signature blocks by span size, largest first.
+
+    Parses sig_lines into top-level blocks (class with methods, standalone
+    function, ctags symbol with members), sorts by max span within each
+    block, and returns lines fitting within cap. This naturally surfaces
+    dispatchers and architecturally significant functions.
+    """
+    # Parse into top-level blocks based on non-indented definitions
+    blocks = []
+    current = []
+
+    for line in sig_lines:
+        stripped = line.strip()
+        # Detect new top-level definition (not indented)
+        is_new_toplevel = False
+        if stripped and (not line[0].isspace()):
+            # Python: def/class/async def at column 0
+            if re.match(r'(?:async\s+)?(?:def|class)\s+\w+', stripped):
+                is_new_toplevel = True
+            # ctags: kind: name at column 0
+            elif re.match(r'\w+:\s+\w+', stripped):
+                is_new_toplevel = True
+
+        if is_new_toplevel and current:
+            # Peel decorator lines off previous block — they belong with new block
+            decorators = []
+            while current and current[-1].strip().startswith('@'):
+                decorators.insert(0, current.pop())
+            # Trim trailing blank lines from previous block
+            while current and not current[-1].strip():
+                current.pop()
+            if current:
+                blocks.append(current)
+            current = decorators + [line]
+        else:
+            current.append(line)
+
+    if current:
+        while current and not current[-1].strip():
+            current.pop()
+        if current:
+            blocks.append(current)
+
+    if not blocks:
+        return []
+
+    # Compute max span for each block
+    def max_span(block):
+        best = 0
+        for ln in block:
+            # Python AST: "# L45-120"
+            m = re.search(r'#\s*L(\d+)-(\d+)', ln)
+            if m:
+                best = max(best, int(m.group(2)) - int(m.group(1)))
+                continue
+            # ctags: "[L45-120]"
+            m = re.search(r'\[L(\d+)-(\d+)\]', ln)
+            if m:
+                best = max(best, int(m.group(2)) - int(m.group(1)))
+        # Fallback: use block line count as proxy when no span annotations
+        if best == 0:
+            best = len(block)
+        return best
+
+    # Sort by span descending (stable sort preserves order for ties)
+    blocks.sort(key=lambda b: -max_span(b))
+
+    # Emit blocks until cap, truncating oversized blocks to fit
+    result = []
+    for block in blocks:
+        sep = 1 if result else 0
+        needed = len(block) + sep
+        if len(result) + needed <= cap:
+            if result:
+                result.append('')
+            result.extend(block)
+        else:
+            # Truncate block to fit remaining space
+            remaining = cap - len(result) - sep
+            if remaining >= 2:  # need at least def/class line + 1 child
+                if result:
+                    result.append('')
+                result.extend(block[:remaining])
+            break
+
+    return result
+
+
+def render_budgeted_tree_lines(tree, dirs, stats, budget, line_counts=None, churn_data=None):
+    """Render a tree with budgeted expansion using importance-based pruning.
+
+    Greedy algorithm:
+    1. Start with root expanded, all children visible but dirs collapsed.
+    2. Priority queue of collapsed dirs by importance.
+    3. Pop highest-importance dir; expand if it fits in budget.
+    4. If too large, partial expansion: top-K children + "... and M more".
+    5. Repeat until budget exhausted or PQ empty.
+    """
+    import heapq
+
+    # Track which directories are expanded
+    expanded = set()
+    # Start: root is expanded
+    root_path = ""
+
+    # Build a priority queue: (-importance, path) for collapsed dirs at root level
+    pq = []
+    for name, children in tree.items():
+        node_path = name
+        is_dir = children or node_path in dirs
+        if is_dir and node_path in stats:
+            heapq.heappush(pq, (-stats[node_path]["importance"], node_path))
+
+    # Current line cost = number of root children
+    current_cost = len(tree)
+
+    while pq and current_cost < budget:
+        neg_imp, dir_path = heapq.heappop(pq)
+        if dir_path in expanded:
+            continue
+
+        # Find this dir's subtree node
+        subtree = _find_subtree(tree, dir_path)
+        if subtree is None:
+            continue
+
+        child_count = len(subtree)
+        if child_count == 0:
+            expanded.add(dir_path)
+            continue
+
+        # Expanding replaces 1 collapsed line with child_count lines (net cost = child_count - 1)
+        # But single-child chains expand for free
+        net_cost = child_count - 1
+
+        if current_cost + net_cost <= budget:
+            # Full expansion fits
+            expanded.add(dir_path)
+            current_cost += net_cost
+            # Push child dirs to PQ
+            for name, children in subtree.items():
+                child_path = f"{dir_path}/{name}"
+                is_dir = children or child_path in dirs
+                if is_dir and child_path in stats:
+                    heapq.heappush(pq, (-stats[child_path]["importance"], child_path))
+        else:
+            # Partial expansion: show top-K children by importance + summary line
+            remaining_budget = budget - current_cost
+            if remaining_budget <= 0:
+                break
+            # We get remaining_budget + 1 slots (replacing the 1 collapsed line)
+            available_slots = remaining_budget + 1
+            if available_slots < 2:
+                # Not enough room even for 1 child + summary
+                break
+
+            # Sort children by importance (dirs) then by line count (files)
+            child_items = []
+            for name, children in subtree.items():
+                child_path = f"{dir_path}/{name}"
+                is_dir = children or child_path in dirs
+                if is_dir and child_path in stats:
+                    imp = stats[child_path]["importance"]
+                else:
+                    imp = line_counts.get(child_path, 0) / 1000.0 if line_counts else 0
+                child_items.append((imp, name))
+            child_items.sort(key=lambda x: -x[0])
+
+            # Show top (available_slots - 1) children, last slot is "... and M more"
+            show_count = min(available_slots - 1, len(child_items))
+            if show_count >= len(child_items):
+                # Can show all children, no need for summary
+                expanded.add(dir_path)
+                current_cost += child_count - 1
+                for name, children in subtree.items():
+                    child_path = f"{dir_path}/{name}"
+                    is_dir = children or child_path in dirs
+                    if is_dir and child_path in stats:
+                        heapq.heappush(pq, (-stats[child_path]["importance"], child_path))
+            else:
+                expanded.add(dir_path)
+                # Mark as partially expanded with the shown children
+                shown_names = set(name for _, name in child_items[:show_count])
+                stats[dir_path]["_partial"] = shown_names
+                stats[dir_path]["_partial_remaining"] = len(child_items) - show_count
+                current_cost += show_count  # show_count children + 1 summary - 1 collapsed = show_count
+            break  # Budget exhausted after partial expansion
+
+    # Now render the tree with expansion info
+    return _render_budgeted_lines(tree, dirs, "", "", expanded, stats, line_counts, churn_data)
+
+
+def _find_subtree(tree, dir_path):
+    """Navigate the tree dict to find a subtree by its path."""
+    parts = dir_path.split("/")
+    node = tree
+    for part in parts:
+        if part not in node:
+            return None
+        node = node[part]
+    return node
+
+
+def _render_budgeted_lines(tree, dirs, prefix, path_prefix, expanded, stats, line_counts, churn_data):
+    """Render tree lines respecting expansion decisions."""
+    lines = []
+    entries = sorted(tree.keys())
+
+    # Check if parent is partially expanded
+    partial_names = None
+    partial_remaining = 0
+    if path_prefix and path_prefix in stats:
+        partial_names = stats[path_prefix].get("_partial")
+        partial_remaining = stats[path_prefix].get("_partial_remaining", 0)
+
+    if partial_names is not None:
+        # Only show children in partial_names, then a summary line
+        shown_entries = [e for e in entries if e in partial_names]
+        hidden_count = partial_remaining
+    else:
+        shown_entries = entries
+        hidden_count = 0
+
+    total_visible = len(shown_entries) + (1 if hidden_count > 0 else 0)
+    for i, name in enumerate(shown_entries):
+        is_last_visible = (i == len(shown_entries) - 1) and hidden_count == 0
+        connector = "\u2514\u2500 " if is_last_visible else "\u251c\u2500 "
+        children = tree[name]
+        node_path = f"{path_prefix}/{name}" if path_prefix else name
+        is_dir = children or node_path in dirs
+
+        if is_dir:
+            if node_path in expanded:
+                # Expanded directory
+                lines.append(f"{prefix}{connector}{name}/")
+                extension = "   " if is_last_visible else "\u2502  "
+                lines.extend(_render_budgeted_lines(
+                    children, dirs, prefix + extension, node_path,
+                    expanded, stats, line_counts, churn_data
+                ))
+            else:
+                # Collapsed directory with annotation
+                annotation = _collapsed_dir_annotation(node_path, stats, churn_data)
+                lines.append(f"{prefix}{connector}{name}/  {annotation}")
+        else:
+            # File
+            lc = line_counts.get(node_path) if line_counts else None
+            if lc is not None:
+                lines.append(f"{prefix}{connector}{name} ({lc})")
+            else:
+                lines.append(f"{prefix}{connector}{name}")
+
+    if hidden_count > 0:
+        connector = "\u2514\u2500 "
+        lines.append(f"{prefix}{connector}... and {hidden_count} more")
+
+    return lines
+
+
+def _collapsed_dir_annotation(dir_path, stats, churn_data):
+    """Build the annotation string for a collapsed directory."""
+    st = stats.get(dir_path)
+    if not st:
+        return ""
+
+    parts = []
+    file_count = st.get("file_count", 0)
+    parts.append(f"{file_count} files" if file_count != 1 else "1 file")
+
+    if churn_data and st.get("hot_count", 0) > 0:
+        hot_count = st["hot_count"]
+        hot_files = st.get("hot_files", [])
+        top_names = [os.path.basename(f) for f, _ in hot_files[:2]]
+        hot_str = f"hot: {hot_count}"
+        if top_names:
+            hot_str += f" \u2014 {', '.join(top_names)}"
+        parts.append(hot_str)
+
+    return f"({'; '.join(parts)})"
+
+
 def render_tree(args):
     depth = None
     root = "."
+    budget = 0
+    churn_data_path = None
     i = 0
     while i < len(args):
         if args[i] == "--depth":
@@ -101,10 +563,16 @@ def render_tree(args):
         elif args[i] == "--root":
             root = args[i + 1]
             i += 2
+        elif args[i] == "--budget":
+            budget = int(args[i + 1])
+            i += 2
+        elif args[i] == "--churn-data":
+            churn_data_path = args[i + 1]
+            i += 2
         else:
             i += 1
 
-    file_list = [line.strip() for line in sys.stdin if line.strip()]
+    file_list = _read_file_list()
     if not file_list:
         print("*(empty)*")
         return
@@ -120,16 +588,40 @@ def render_tree(args):
         except OSError:
             pass
 
+    # Load churn data if provided
+    churn_data = None
+    if churn_data_path:
+        try:
+            with open(churn_data_path) as fh:
+                churn_data = json.load(fh)
+        except (OSError, json.JSONDecodeError):
+            pass
+
     tree, dirs = build_tree(file_list, depth)
     root_label = root.rstrip("/") if root != "." else "."
     print(f"## Tree: `{root_label}`")
-    depth_info = f"depth: {depth}" if depth else "full depth"
-    print(f"> Filtered directory structure from git-tracked files ({depth_info}, {len(file_list)} files). Request `rqs tree <path> --depth N` to explore subdirectories.")
-    print(f"```")
-    print(f"{root_label}/")
-    for line in render_tree_lines(tree, dirs, line_counts=line_counts):
-        print(line)
-    print(f"```")
+
+    if budget > 0:
+        # Budgeted mode
+        depth_info = f"depth: {depth}" if depth else "full depth"
+        churn_note = ", churn-informed" if churn_data else ""
+        print(f"> Budgeted directory structure ({depth_info}, {len(file_list)} files, budget: {budget} lines{churn_note}).")
+        print(f"> Collapsed dirs show (file count). Request `rqs tree <path> --depth N` to explore.")
+        print(f"```")
+        print(f"{root_label}/")
+        subtree_stats = compute_subtree_stats(tree, dirs, "", line_counts, churn_data)
+        for line in render_budgeted_tree_lines(tree, dirs, subtree_stats, budget, line_counts, churn_data):
+            print(line)
+        print(f"```")
+    else:
+        # Unlimited mode (backward compatible)
+        depth_info = f"depth: {depth}" if depth else "full depth"
+        print(f"> Filtered directory structure from git-tracked files ({depth_info}, {len(file_list)} files). Request `rqs tree <path> --depth N` to explore subdirectories.")
+        print(f"```")
+        print(f"{root_label}/")
+        for line in render_tree_lines(tree, dirs, line_counts=line_counts):
+            print(line)
+        print(f"```")
 
 
 # ── Symbol Rendering ───────────────────────────────────────────────────────
@@ -810,11 +1302,16 @@ def render_signatures(args):
 
     Python files: full AST analysis (signatures, decorators, docstrings, returns).
     Other languages: ctags-based behavioral sketch (signatures, line spans).
+
+    With --budget N, ranks files by importance and partitions into
+    full-detail, catalog, and omitted tiers.
     """
     repo_root = os.environ.get("RQS_TARGET_REPO", ".")
 
     scope = None
     with_spans = False
+    budget = 0
+    churn_data_path = None
     i = 0
     while i < len(args):
         if args[i] == "--scope":
@@ -823,10 +1320,16 @@ def render_signatures(args):
         elif args[i] == "--with-line-spans":
             with_spans = True
             i += 1
+        elif args[i] == "--budget":
+            budget = int(args[i + 1])
+            i += 2
+        elif args[i] == "--churn-data":
+            churn_data_path = args[i + 1]
+            i += 2
         else:
             i += 1
 
-    file_list = [line.strip() for line in sys.stdin if line.strip()]
+    file_list = _read_file_list()
     if not file_list:
         print("*(no files found)*")
         return
@@ -834,7 +1337,7 @@ def render_signatures(args):
     py_files = [f for f in file_list if f.endswith(".py")]
     other_files = [f for f in file_list if not f.endswith(".py")]
 
-    results = []
+    results = []  # [(filepath, sig_lines, lang, loc)]
 
     # Python: AST analysis
     for filepath in py_files:
@@ -861,7 +1364,8 @@ def render_signatures(args):
 
         ext = os.path.splitext(filepath)[1]
         lang = _LANG_MAP.get(ext, "")
-        results.append((filepath, sig_lines, lang))
+        loc = len(source_lines)
+        results.append((filepath, sig_lines, lang, loc))
 
     # Non-Python: ctags-based signatures
     for filepath in other_files:
@@ -873,13 +1377,36 @@ def render_signatures(args):
             continue
         ext = os.path.splitext(filepath)[1]
         lang = _LANG_MAP.get(ext, "")
-        results.append((filepath, sig_lines, lang))
+        # Count lines for LOC
+        abs_path = os.path.join(repo_root, filepath)
+        loc = 0
+        try:
+            with open(abs_path) as f:
+                loc = sum(1 for _ in f)
+        except (OSError, UnicodeDecodeError):
+            pass
+        results.append((filepath, sig_lines, lang, loc))
 
     if not results:
         print("*(no signatures found)*")
         return
 
-    # Print top-level header with description once
+    if budget > 0:
+        # Load churn data if provided
+        churn_data = None
+        if churn_data_path:
+            try:
+                with open(churn_data_path) as f:
+                    churn_data = json.load(f)
+            except (OSError, json.JSONDecodeError):
+                pass
+        _render_signatures_budgeted(results, scope, with_spans, budget, churn_data)
+    else:
+        _render_signatures_unlimited(results, scope, with_spans)
+
+
+def _render_signatures_unlimited(results, scope, with_spans):
+    """Render all signatures without budget — backward compatible."""
     if with_spans:
         title = f"## Symbol Map: `{scope}`" if scope else "## Symbol Map"
         print(title)
@@ -889,7 +1416,7 @@ def render_signatures(args):
         print(title)
         print("> Behavioral sketch: signatures, structure, and key details per file. Request `rqs slice <file> <start> <end>` to see full code.")
 
-    for filepath, sig_lines, lang in results:
+    for filepath, sig_lines, lang, loc in results:
         _open_tag("file", path=filepath, language=lang or "text")
         print(f"\n### `{filepath}`")
         print(f"```{lang}")
@@ -897,6 +1424,99 @@ def render_signatures(args):
             print(line)
         print("```")
         _close_tag("file")
+
+
+def _render_signatures_budgeted(results, scope, with_spans, budget, churn_data):
+    """Render signatures with budget, ranking files by importance."""
+    per_file_cap = 20
+    has_churn = churn_data is not None
+
+    # Score all files
+    scored = []
+    total_symbols = 0
+    for filepath, sig_lines, lang, loc in results:
+        churn_commits = 0
+        churn_lines = 0
+        if churn_data:
+            cd = churn_data.get(filepath)
+            if cd:
+                churn_commits = cd.get("commits", 0)
+                churn_lines = cd.get("lines", 0)
+        importance = _file_symbol_importance(loc, churn_commits, churn_lines, has_churn)
+        total_symbols += _count_symbols_in_lines(sig_lines)
+        scored.append((importance, filepath, sig_lines, lang, loc))
+
+    # Sort by importance descending
+    scored.sort(key=lambda x: (-x[0], x[1]))
+
+    # Budget allocation
+    overhead = max(5, int(budget * 0.05))
+    remaining = budget - overhead
+    full_budget = int(remaining * 0.63)
+    catalog_budget = remaining - full_budget
+
+    # Partition into tiers
+    full_detail = []  # [(filepath, sig_lines, lang, loc)]
+    full_used = 0
+
+    catalog = []  # [(filepath, sig_lines, lang, loc)]
+    catalog_used = 0
+
+    for importance, filepath, sig_lines, lang, loc in scored:
+        # Prioritize symbols by span size (surfaces dispatchers), then cap
+        capped = _prioritize_by_span(sig_lines, per_file_cap)
+        if not capped:
+            capped = sig_lines[:per_file_cap]
+        total_sym = _count_symbols_in_lines(sig_lines)
+        capped_sym = _count_symbols_in_lines(capped)
+        truncated_count = total_sym - capped_sym
+
+        # Cost: 3 (header + fences) + len(capped) + (1 if truncated)
+        cost = 3 + len(capped) + (1 if truncated_count > 0 else 0)
+
+        if full_used + cost <= full_budget:
+            full_detail.append((filepath, capped, lang, loc, truncated_count))
+            full_used += cost
+        elif catalog_used < catalog_budget:
+            catalog.append((filepath, sig_lines, lang, loc))
+            catalog_used += 1
+        # else: omitted
+
+    omitted_count = len(results) - len(full_detail) - len(catalog)
+
+    # Render header
+    total_files = len(results)
+    churn_label = " (churn-ranked)" if has_churn else ""
+    if with_spans:
+        title = f"## Symbol Map: `{scope}`" if scope else "## Symbol Map"
+    else:
+        title = f"## Signatures: `{scope}`" if scope else "## Signatures"
+    print(title)
+    print(f"> Budgeted symbol map: {total_files} files, {total_symbols} symbols. "
+          f"{len(full_detail)} files in detail, {len(catalog)} in catalog{churn_label}.")
+    print(f"> Request `rqs signatures <file>` for full detail on any file.")
+
+    # Full detail tier
+    for filepath, capped, lang, loc, truncated_count in full_detail:
+        _open_tag("file", path=filepath, language=lang or "text")
+        print(f"\n### `{filepath}`")
+        print(f"```{lang}")
+        for line in capped:
+            print(line)
+        if truncated_count > 0:
+            print(f"# ... and {truncated_count} more symbols")
+        print("```")
+        _close_tag("file")
+
+    # Catalog tier
+    if catalog:
+        print(f"\n### Catalog ({len(catalog)} files)\n")
+        for filepath, sig_lines, lang, loc in catalog:
+            print(_format_catalog_entry(filepath, sig_lines, lang, loc))
+
+    # Omitted count
+    if omitted_count > 0:
+        print(f"\n*({omitted_count} more files not shown. Use `rqs signatures <path>` to explore.)*")
 
 
 # ── Show Rendering ─────────────────────────────────────────────────────────
@@ -1127,7 +1747,7 @@ def render_files(args):
     pattern = args[0] if args else "?"
     repo_root = os.environ.get("RQS_TARGET_REPO", ".")
 
-    file_list = [line.strip() for line in sys.stdin if line.strip()]
+    file_list = _read_file_list()
     if not file_list:
         print(f"*(no files matching `{pattern}`)*")
         return
@@ -2015,6 +2635,26 @@ def render_notebook_debug(args):
 SHADES = " \u2591\u2592\u2593\u2588"
 
 
+def render_churn_summary(args):
+    """Output JSON churn summary from git log --numstat on stdin.
+
+    Reads the same format as render_churn (COMMIT<TAB>author + numstat lines),
+    outputs a JSON dict mapping file paths to {commits, lines}.
+    """
+    content = sys.stdin.read()
+    commits = _parse_churn_log(content)
+    file_commits = Counter()
+    file_total = Counter()
+    for commit in commits:
+        for filename, changes in commit.get("files", []):
+            file_commits[filename] += 1
+            file_total[filename] += changes
+    summary = {}
+    for f in file_commits:
+        summary[f] = {"commits": file_commits[f], "lines": file_total[f]}
+    print(json.dumps(summary))
+
+
 def _parse_churn_log(content):
     """Parse git log --pretty=format:COMMIT --numstat into chronological commit list.
 
@@ -2325,24 +2965,37 @@ def render_churn(args):
         )
 
         if sustained:
+            # Budget: section overhead is 6 lines (blank, heading, description, blank, header, separator)
+            MAX_SUSTAINED_LINES = 100
+            sustained_overhead = 6
+            max_sustained_rows = MAX_SUSTAINED_LINES - sustained_overhead
+            total_sustained = len(sustained)
+            shown_sustained = sustained[:max_sustained_rows]
+            omitted_sustained = total_sustained - len(shown_sustained)
+
             print()
             print("### Sustained Development Files")
-            print(f"> Files with ongoing modification across their lifespan. "
-                  f"Continuity = fraction of timeline buckets with activity since the file first appeared. "
-                  f"High-continuity files are likely central to ongoing development.")
+            if omitted_sustained > 0:
+                print(f"> Files with ongoing modification across their lifespan "
+                      f"(showing {len(shown_sustained)} of {total_sustained}). "
+                      f"Continuity = fraction of timeline buckets with activity since the file first appeared.")
+            else:
+                print(f"> Files with ongoing modification across their lifespan. "
+                      f"Continuity = fraction of timeline buckets with activity since the file first appeared. "
+                      f"High-continuity files are likely central to ongoing development.")
             print()
 
             # Column widths
-            sw_cont = max(max((len(f"{c:.0%}") for _, c in sustained), default=10), 10)  # "Continuity"
+            sw_cont = max(max((len(f"{c:.0%}") for _, c in shown_sustained), default=10), 10)  # "Continuity"
             sw_span = max(max((len(f"{sum(1 for v in file_buckets[f] if v > 0)}/{num_buckets - file_first_seen.get(f, 0) // bucket_size}")
-                              for f, _ in sustained), default=6), 6)  # "Active"
-            sw_commits = max(max((len(str(file_commits[f])) for f, _ in sustained), default=7), 7)
-            sw_lines = max(max((len(str(file_total[f])) for f, _ in sustained), default=5), 5)
-            sw_file = max(max((len(f) + 2 for f, _ in sustained), default=4), 4)
+                              for f, _ in shown_sustained), default=6), 6)  # "Active"
+            sw_commits = max(max((len(str(file_commits[f])) for f, _ in shown_sustained), default=7), 7)
+            sw_lines = max(max((len(str(file_total[f])) for f, _ in shown_sustained), default=5), 5)
+            sw_file = max(max((len(f) + 2 for f, _ in shown_sustained), default=4), 4)
 
             print(f"| {'Continuity':>{sw_cont}} | {'Active':>{sw_span}} | {'Commits':>{sw_commits}} | {'Lines':>{sw_lines}} | {'File':<{sw_file}} |")
             print(f"|{'-' * (sw_cont + 2)}|{'-' * (sw_span + 2)}|{'-' * (sw_commits + 2)}|{'-' * (sw_lines + 2)}|{'-' * (sw_file + 2)}|")
-            for f, cont in sustained:
+            for f, cont in shown_sustained:
                 first_b = file_first_seen.get(f, 0) // bucket_size
                 possible = num_buckets - first_b
                 active = sum(1 for val in file_buckets[f][first_b:] if val > 0)
@@ -2412,12 +3065,34 @@ def render_churn(args):
             cluster_list.append((members, edge_list, avg_coupling))
         cluster_list.sort(key=lambda x: (-len(x[0]), -x[2]))
 
+        MAX_CLUSTER_LINES = 100
+        # Section header overhead: blank + heading + description = 3 lines
+        cluster_section_lines = 3
+
         print()
         print("### Co-change Clusters")
         print(f"> Files that frequently change together (Jaccard coupling >= {min_coupling:.0%}, "
               f"min {MIN_CO_COMMITS} co-commits). Connected pairs form clusters.")
 
+        clusters_shown = 0
         for ci, (members, edge_list, avg_coupling) in enumerate(cluster_list, 1):
+            # Estimate lines for this cluster:
+            # blank + heading + blank + table header + separator + N members
+            # + blank + coupling header + separator + M coupling pairs
+            top_edges = sorted(edge_list, key=lambda e: (-e[2], -e[3]))[:10]
+            cluster_lines = 5 + len(members) + 3 + len(top_edges)
+
+            # If we've already shown at least one cluster and this would exceed budget, stop
+            if clusters_shown > 0 and cluster_section_lines + cluster_lines > MAX_CLUSTER_LINES:
+                omitted_clusters = len(cluster_list) - clusters_shown
+                if omitted_clusters > 0:
+                    print()
+                    print(f"*({omitted_clusters} more clusters omitted for brevity)*")
+                break
+
+            cluster_section_lines += cluster_lines
+            clusters_shown += 1
+
             # Sort members by commit count desc
             sorted_members = sorted(members, key=lambda f: (-file_commits[f], f))
             print()
@@ -2438,7 +3113,6 @@ def render_churn(args):
                 print(f"| {commits_col} | {lines_col} | {file_col} |")
 
             # Show top coupling pairs within the cluster
-            top_edges = sorted(edge_list, key=lambda e: (-e[2], -e[3]))[:10]
             cw_coupling = max(len("Coupling"), max((len(f"{j:.0%}") for _, _, j, _ in top_edges), default=8))
             cw_co = max(len("Co-commits"), max((len(str(c)) for _, _, _, c in top_edges), default=10))
             cw_pair = max(len("File pair"),
@@ -2478,7 +3152,10 @@ MODES = {
     "notebook": render_notebook,
     "notebook-debug": render_notebook_debug,
     "churn": render_churn,
+    "churn-summary": render_churn_summary,
 }
+
+RAW_MODES = {"churn-summary"}
 
 
 def main():
@@ -2494,11 +3171,14 @@ def main():
         print(f"error: unknown render mode '{mode}'", file=sys.stderr)
         sys.exit(1)
 
-    _open_tag(mode)
+    raw = mode in RAW_MODES
+    if not raw:
+        _open_tag(mode)
     try:
         MODES[mode](args)
     finally:
-        _close_tag(mode)
+        if not raw:
+            _close_tag(mode)
 
 
 if __name__ == "__main__":

@@ -12,6 +12,7 @@ Generates markdown sections that accelerate repository orientation:
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import re
 import subprocess
@@ -21,20 +22,36 @@ from typing import Dict, List, Sequence, Set, Tuple
 
 
 MAX_SCAN_BYTES = 512_000
-MAX_SCAN_FILES = 2000
+MAX_TEXT_SCAN_FILES = 2500
 
 TEXT_EXTS = {
     ".py", ".sh", ".bash", ".zsh", ".js", ".jsx", ".ts", ".tsx", ".go", ".rb",
     ".rs", ".java", ".c", ".cc", ".cpp", ".h", ".hpp", ".cs", ".php", ".swift",
-    ".kt", ".kts", ".scala", ".sql", ".md", ".rst", ".txt", ".toml", ".yaml",
-    ".yml", ".json", ".xml", ".ini", ".cfg", ".conf",
+    ".kt", ".kts", ".scala", ".lua", ".sql", ".md", ".rst", ".txt", ".toml",
+    ".yaml", ".yml", ".json", ".xml", ".ini", ".cfg", ".conf",
 }
 
 ENTRY_NAME_HINTS = {
-    "main.py", "main.go", "main.rs", "index.js", "app.py", "app.js",
-    "cli.py", "cli.js", "manage.py", "server.py", "server.js", "rakefile",
-    "makefile",
+    "main.py", "main.go", "main.rs", "main.c", "main.cc", "main.cpp",
+    "index.js", "app.py", "app.js",
+    "cli.py", "cli.js", "manage.py", "server.py", "server.js",
 }
+
+# Paths that are build/CI orchestration, not runtime entrypoints.
+_CI_BUILD_PREFIXES = (
+    ".github/", "contrib/", "ci/", ".circleci/", ".buildkite/",
+    "scripts/ci", "scripts/release",
+)
+
+_BUILD_TOOL_FILES = {
+    "makefile", "gnumakefile", "cmakelists.txt", "meson.build", "build.ninja",
+    "package.json", "setup.py", "pyproject.toml",
+}
+
+_NON_RUNTIME_PREFIXES = (
+    "runtime/scripts/", "doc/", "docs/", "test/", "tests/", "bench/", "benchmarks/",
+    "examples/", "example/",
+)
 
 
 def _xml_escape_attr(value: object) -> str:
@@ -86,7 +103,7 @@ def run_git_ls_files(repo_root: str) -> List[str]:
     if proc.returncode != 0:
         return []
     files = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
-    return files[:MAX_SCAN_FILES]
+    return files
 
 
 def safe_read_text(repo_root: str, rel_path: str) -> str:
@@ -124,14 +141,60 @@ def is_text_candidate(rel_path: str) -> bool:
     return False
 
 
+def _text_scan_priority(rel_path: str) -> int:
+    """Heuristic priority for expensive full-text scanning."""
+    rel_l = rel_path.lower()
+    base_l = os.path.basename(rel_l)
+    ext = os.path.splitext(rel_l)[1]
+
+    score = 0
+    if rel_l.startswith(("bin/", "src/", "lib/", "app/", "core/", "cmd/", "internal/")):
+        score += 8
+    if rel_l.startswith(("tests/", "test/")) or "/tests/" in rel_l or "/test/" in rel_l:
+        score += 6
+    if rel_l.startswith(("conf/", "config/", ".github/")):
+        score += 5
+    if ext in {".py", ".c", ".cc", ".cpp", ".h", ".hpp", ".go", ".rs", ".java", ".js", ".ts", ".sh", ".bash", ".lua"}:
+        score += 7
+    if ext in {".md", ".rst", ".txt"}:
+        score -= 3
+    if base_l in {"makefile", "cmakelists.txt", "dockerfile"}:
+        score += 2
+    return score
+
+
+def select_text_files_for_scan(files: Sequence[str]) -> List[str]:
+    """Select a prioritized subset for full-text scanning while keeping full file index."""
+    candidates = [f for f in files if is_text_candidate(f)]
+    if len(candidates) <= MAX_TEXT_SCAN_FILES:
+        return candidates
+    ranked = sorted(candidates, key=lambda p: (-_text_scan_priority(p), p))
+    return ranked[:MAX_TEXT_SCAN_FILES]
+
+
 def _is_fixture(rel: str) -> bool:
     return "tests/fixtures/" in rel or rel.startswith("tests/fixtures/")
+
+
+def _is_build_orchestration_path(rel: str) -> bool:
+    rel_l = rel.lower()
+    base_l = os.path.basename(rel_l)
+    if base_l in _BUILD_TOOL_FILES:
+        return True
+    if any(rel_l.startswith(p) for p in _CI_BUILD_PREFIXES):
+        return True
+    if rel_l.startswith(("cmake/", "build/", "packaging/", "dist/")):
+        return True
+    return False
 
 
 def find_entrypoints(repo_root: str, files: Sequence[str], texts: Dict[str, str]) -> List[Entrypoint]:
     entrypoints: List[Entrypoint] = []
     for rel in files:
         if _is_fixture(rel):
+            continue
+        # Skip CI/build orchestration — not runtime entrypoints
+        if _is_build_orchestration_path(rel):
             continue
         base = os.path.basename(rel)
         base_l = base.lower()
@@ -168,6 +231,22 @@ def find_entrypoints(repo_root: str, files: Sequence[str], texts: Dict[str, str]
             if re.search(r"if __name__ == [\"']__main__[\"']", text):
                 score += 2
                 signals.append("__main__")
+            # C/C++ main function
+            if ext in {".c", ".cc", ".cpp"} and re.search(r"\bint\s+main\s*\(", text):
+                score += 5
+                signals.append("c-main")
+
+        has_runtime_router = any(
+            s in signals for s in ("case-dispatch", "cli-parser", "__main__", "c-main", "bin")
+        )
+
+        # Penalize common non-runtime locations/scripts unless they expose router signals.
+        if any(rel.lower().startswith(p) for p in _NON_RUNTIME_PREFIXES) and not has_runtime_router:
+            score -= 4
+            signals.append("non-runtime-path")
+        if ext in {".sh", ".bash"} and not rel.startswith("bin/") and not has_runtime_router:
+            score -= 3
+            signals.append("non-entry-shell")
 
         if score >= 4:
             entrypoints.append(Entrypoint(path=rel, score=score, signals=signals))
@@ -287,14 +366,121 @@ def parse_dispatch(entrypoints: Sequence[Entrypoint], texts: Dict[str, str], fil
     return result
 
 
+def compute_file_continuity(repo_root: str, tracked_files: Sequence[str], target_buckets: int = 40) -> Dict[str, float]:
+    """Continuity per file over full git history once the file first appears.
+
+    Continuity = active_buckets_since_first_seen / buckets_since_first_seen.
+    """
+    tracked = set(tracked_files)
+    if not tracked:
+        return {}
+
+    try:
+        proc = subprocess.run(
+            ["git", "log", "--pretty=format:COMMIT", "--name-only"],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return {}
+    if proc.returncode != 0:
+        return {}
+
+    commits: List[List[str]] = []
+    current: List[str] = []
+    for raw in proc.stdout.splitlines():
+        line = raw.strip()
+        if line == "COMMIT":
+            if current:
+                commits.append(current)
+            current = []
+            continue
+        if not line:
+            continue
+        if line in tracked:
+            current.append(line)
+    if current:
+        commits.append(current)
+
+    commits.reverse()  # chronological
+    if not commits:
+        return {}
+
+    bucket_size = max(1, round(len(commits) / max(1, target_buckets)))
+    num_buckets = max(1, math.ceil(len(commits) / bucket_size))
+
+    first_bucket: Dict[str, int] = {}
+    active_buckets: Dict[str, Set[int]] = defaultdict(set)
+    for ci, touched in enumerate(commits):
+        b = ci // bucket_size
+        for rel in set(touched):
+            if rel not in first_bucket:
+                first_bucket[rel] = b
+            active_buckets[rel].add(b)
+
+    continuity: Dict[str, float] = {}
+    for rel, first_b in first_bucket.items():
+        possible = num_buckets - first_b
+        if possible <= 0:
+            continue
+        active = sum(1 for b in active_buckets[rel] if b >= first_b)
+        continuity[rel] = active / possible
+    return continuity
+
+
+def rerank_entrypoints(
+    entrypoints: Sequence[Entrypoint],
+    critical_scores: Sequence[Tuple[str, float, Dict[str, float]]],
+    continuity: Dict[str, float],
+) -> List[Tuple[Entrypoint, float, float, float]]:
+    """Blend heuristic, structural, and continuity signals for orientation ranking."""
+    if not entrypoints:
+        return []
+
+    crit_map = {rel: (score, comp) for rel, score, comp in critical_scores}
+    max_crit = max((score for _, score, _ in critical_scores), default=1.0) or 1.0
+
+    ranked: List[Tuple[Entrypoint, float, float, float]] = []
+    for ep in entrypoints:
+        cscore, comp = crit_map.get(ep.path, (0.0, {}))
+        fanin = float(comp.get("fanin", 0.0))
+        dispatch = float(comp.get("dispatch", 0.0))
+        cont = continuity.get(ep.path, 0.0)
+
+        structural = (cscore / max_crit) * 4.0
+        blended = float(ep.score) + structural + min(fanin, 8.0) * 0.8 + min(dispatch, 4.0) * 1.2 + cont * 2.5
+
+        # Soft penalties for build/tooling surfaces still slipping through.
+        if _is_build_orchestration_path(ep.path):
+            blended -= 4.0
+        if any(ep.path.lower().startswith(p) for p in _NON_RUNTIME_PREFIXES):
+            blended -= 2.0
+
+        ranked.append((ep, blended, cscore, cont))
+
+    ranked.sort(key=lambda row: (-row[1], row[0].path))
+    return ranked[:8]
+
+
 def find_test_files(files: Sequence[str]) -> List[str]:
     tests: List[str] = []
     for rel in files:
         base = os.path.basename(rel).lower()
+        # Directory-based detection: tests/ or test/ at any level
         if rel.startswith("tests/") or "/tests/" in rel:
             tests.append(rel)
             continue
+        if rel.startswith("test/") or "/test/" in rel:
+            tests.append(rel)
+            continue
+        # Filename-based detection
         if base.startswith("test_") or base.endswith("_test.py") or base.endswith(".spec.js"):
+            tests.append(rel)
+            continue
+        # Lua test conventions: _spec.lua (busted/plenary)
+        if base.endswith("_spec.lua") or base.endswith("_test.lua"):
             tests.append(rel)
     return sorted(set(tests))
 
@@ -307,6 +493,9 @@ def extract_test_case_count(rel: str, text: str) -> int:
         return len(re.findall(r"^\s*def\s+test_[A-Za-z0-9_]+\s*\(", text, flags=re.MULTILINE))
     if ext in {".js", ".jsx", ".ts", ".tsx"}:
         return len(re.findall(r"\b(?:it|test)\s*\(\s*[\"']", text))
+    if ext == ".lua":
+        # Lua busted/plenary: it('...') and describe('...')
+        return len(re.findall(r"\bit\s*\(\s*[\"']", text))
     return 0
 
 
@@ -318,6 +507,9 @@ def extract_assert_count(rel: str, text: str) -> int:
         return len(re.findall(r"\bassert\b", text))
     if ext in {".js", ".jsx", ".ts", ".tsx"}:
         return len(re.findall(r"\bexpect\s*\(", text))
+    if ext == ".lua":
+        # Lua test assertions: eq(), ok(), neq(), matches(), assert
+        return len(re.findall(r"\b(?:eq|ok|neq|matches)\s*\(", text)) + len(re.findall(r"\bassert\b", text))
     return 0
 
 
@@ -423,6 +615,38 @@ def resolve_internal_dep(rel: str, dep: str, file_set: Set[str]) -> str:
                 return c
         return ""
 
+    if ext in {".c", ".cc", ".cpp", ".h", ".hpp"}:
+        dep = dep.strip().strip("'\"<>")
+        if not dep or dep.startswith("/"):
+            return ""
+
+        candidates = [dep]
+        if src_dir:
+            candidates.append(os.path.normpath(os.path.join(src_dir, dep)).replace("\\", "/"))
+            candidates.append(os.path.normpath(os.path.join(src_dir, "..", dep)).replace("\\", "/"))
+
+        for root in ("src", "include", "lib"):
+            candidates.append(f"{root}/{dep}")
+
+        # Header without path often lives near the source directory.
+        if "/" not in dep and dep.endswith((".h", ".hpp")):
+            if src_dir:
+                candidates.append(f"{src_dir}/{dep}")
+            parent = os.path.dirname(src_dir)
+            if parent:
+                candidates.append(f"{parent}/{dep}")
+
+        # Deduplicate while preserving order.
+        seen = set()
+        for c in candidates:
+            norm = os.path.normpath(c).replace("\\", "/")
+            if norm in seen:
+                continue
+            seen.add(norm)
+            if norm in file_set:
+                return norm
+        return ""
+
     return ""
 
 
@@ -459,6 +683,12 @@ def extract_internal_edges(files: Sequence[str], texts: Dict[str, str], file_set
 
         elif ext in {".sh", ".bash"}:
             for mod in re.findall(r"(?:^|\s)(?:source|\.)\s+([A-Za-z0-9_./'\"-]+)", text):
+                dep = resolve_internal_dep(rel, mod, file_set)
+                if dep:
+                    deps.add(dep)
+
+        elif ext in {".c", ".cc", ".cpp", ".h", ".hpp"}:
+            for mod in re.findall(r"^\s*#\s*include\s*[<\"]([^\">]+)[\">]", text, flags=re.MULTILINE):
                 dep = resolve_internal_dep(rel, mod, file_set)
                 if dep:
                     deps.add(dep)
@@ -594,6 +824,7 @@ def render_orientation(
     entrypoints: Sequence[Entrypoint],
     dispatch_entries: Sequence[DispatchEntry],
     critical_scores: Sequence[Tuple[str, float, Dict[str, float]]],
+    continuity: Dict[str, float],
 ) -> None:
     def print_table(headers: Sequence[str], rows: Sequence[Sequence[object]], right_align: Set[int] | None = None) -> None:
         if right_align is None:
@@ -617,14 +848,18 @@ def render_orientation(
     print("> Entrypoints, dispatch surface, and critical-path ranking.")
 
     print("\n**Likely entrypoints:**")
-    if not entrypoints:
+    ranked_entrypoints = rerank_entrypoints(entrypoints, critical_scores, continuity)
+    if not ranked_entrypoints:
         print("- *(no likely entrypoints detected by current heuristics)*")
         print("- Expected signals include executable files in `bin/`, entry-like filenames (`main`, `app`, `cli`, `server`), Python `__main__` blocks, and CLI parser wiring.")
         print("- Implication: this repo may be library-first, config/framework-driven, monorepo-style, or using entry conventions not covered by current static checks.")
     else:
-        for ep in entrypoints[:6]:
+        for ep, blended, cscore, cont in ranked_entrypoints[:6]:
             signals = ", ".join(ep.signals[:3]) if ep.signals else "heuristic"
-            print(f"- `{ep.path}` (score {ep.score}; {signals})")
+            print(
+                f"- `{ep.path}` (entry {ep.score}, blend {blended:.1f}, "
+                f"critical {cscore:.1f}, continuity {cont:.0%}; {signals})"
+            )
 
     print("\n**Dispatch surface:**")
     if not dispatch_entries:
@@ -746,7 +981,7 @@ def main() -> None:
     files = run_git_ls_files(repo_root)
     file_set = set(files)
 
-    text_files = [f for f in files if is_text_candidate(f)]
+    text_files = select_text_files_for_scan(files)
     texts = {f: safe_read_text(repo_root, f) for f in text_files}
     line_counts = {f: safe_line_count(repo_root, f) for f in files}
 
@@ -760,6 +995,7 @@ def main() -> None:
     command_hits = extract_rqs_command_hits(test_texts)
 
     edges = extract_internal_edges(files, texts, file_set)
+    continuity = compute_file_continuity(repo_root, files)
     # Reuse a merged text map for symbol counting in critical score calculation.
     merged_texts = dict(texts)
     merged_texts.update(test_texts)
@@ -777,9 +1013,9 @@ def main() -> None:
     hotspots = find_risk_hotspots(texts)
 
     if args.level in {"medium", "heavy"}:
-        render_orientation(entrypoints, dispatch_entries, critical_scores)
+        render_orientation(entrypoints, dispatch_entries, critical_scores, continuity)
     else:
-        render_orientation(entrypoints, dispatch_entries, [])
+        render_orientation(entrypoints, dispatch_entries, [], continuity)
     print("")
     render_runtime_boundaries(boundaries)
 

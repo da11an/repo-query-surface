@@ -124,7 +124,7 @@ A Linux-native CLI for exposing **structured, queryable repository context** to 
 - Strict shell fail-fast mode: `bin/rqs:5`, `lib/rqs_common.sh:4`
 - Repository boundary enforcement: `bin/rqs:32`, `lib/primer_insights.py:336`
 - Layered config loading: `README.md:270`, `bin/rqs:98`
-- CLI input validation: `lib/primer_insights.py:338`, `lib/rqs_callees.sh:27`
+- CLI input validation: `lib/primer_insights.py:338`, `lib/render.py:2086`
 </runtime_boundaries>
 
 <behavioral_contract>
@@ -132,7 +132,7 @@ A Linux-native CLI for exposing **structured, queryable repository context** to 
 > What the test suite explicitly validates today.
 - Test files detected: 9
 - Named test cases detected: 22
-- Assertion-like checks detected: 264
+- Assertion-like checks detected: 266
 
 **Most exercised command surfaces:**
 - `context` (3 references)
@@ -169,7 +169,7 @@ A Linux-native CLI for exposing **structured, queryable repository context** to 
 
 <tree>
 ## Tree: `.`
-> Filtered directory structure from git-tracked files (depth: 3, 37 files). Request `rqs tree <path> --depth N` to explore subdirectories.
+> Filtered directory structure from git-tracked files (depth: 3, 39 files). Request `rqs tree <path> --depth N` to explore subdirectories.
 ```
 ./
 ├─ .gitignore (3)
@@ -181,10 +181,12 @@ A Linux-native CLI for exposing **structured, queryable repository context** to 
 │  ├─ defaults.conf (32)
 │  ├─ ignore_patterns.conf (45)
 │  └─ import_patterns.conf (42)
+├─ context.md (169)
 ├─ lib/
 │  ├─ primer_insights.py (796)
-│  ├─ render.py (2177)
+│  ├─ render.py (2268)
 │  ├─ rqs_callees.sh (44)
+│  ├─ rqs_churn.sh (48)
 │  ├─ rqs_common.sh (225)
 │  ├─ rqs_context.sh (65)
 │  ├─ rqs_definition.sh (67)
@@ -206,7 +208,7 @@ A Linux-native CLI for exposing **structured, queryable repository context** to 
 └─ tests/
    ├─ fixtures/
    │  └─ sample-repo/
-   └─ run_tests.sh (785)
+   └─ run_tests.sh (787)
 ```
 </tree>
 
@@ -214,7 +216,7 @@ A Linux-native CLI for exposing **structured, queryable repository context** to 
 ## Module Summaries
 
 ### `./`
-*3 files, 1 .md*
+*4 files, 2 .md*
 
 ### `bin/`
 *1 files*
@@ -223,8 +225,8 @@ A Linux-native CLI for exposing **structured, queryable repository context** to 
 *3 files, 3 .conf*
 
 ### `lib/`
-*21 files, 2 .py, 19 .sh*
-`_xml_escape_attr`, `_open_tag`, `_close_tag`, `DispatchEntry`, `Entrypoint`, `run_git_ls_files`, `safe_read_text`, `safe_line_count`, `is_text_candidate`, `_is_fixture`, ... (89 total)
+*22 files, 2 .py, 20 .sh*
+`_xml_escape_attr`, `_open_tag`, `_close_tag`, `DispatchEntry`, `Entrypoint`, `run_git_ls_files`, `safe_read_text`, `safe_line_count`, `is_text_candidate`, `_is_fixture`, ... (90 total)
 
 ### `tests/`
 *9 files, 3 .ipynb, 1 .md, 3 .py, 2 .sh*
@@ -575,15 +577,21 @@ def render_notebook_debug(args):  # L1941-2007
         return
         return
 
-def _parse_churn_log(content):  # L2016-2040
+def _parse_churn_log(content):  # L2016-2047
     # Parse git log --pretty=format:COMMIT --numstat into chronological commit list.
     return commits
 
-def render_churn(args):  # L2043-2121
+def _auto_churn_bucket_size(commit_count):  # L2050-2065
+    # Choose commits-per-bucket to target ~50 buckets (prefer 30-60 when possible).
+    return bucket_size
+        return 1
+        return 1
+
+def render_churn(args):  # L2068-2212
     # Render file modification heatmap from git log --numstat output.
         return
 
-def main():  # L2151-2168
+def main():  # L2242-2259
     ...
 ```
 </file>
@@ -599,6 +607,13 @@ function: resolve_target_repo [L17]
 ### `lib/rqs_callees.sh`
 ```bash
 function: cmd_callees [L4]
+```
+</file>
+<file path="lib/rqs_churn.sh" language="bash">
+
+### `lib/rqs_churn.sh`
+```bash
+function: cmd_churn [L4]
 ```
 </file>
 <file path="lib/rqs_common.sh" language="bash">
@@ -803,9 +818,9 @@ function: test_files [L494]
 function: test_callees [L524]
 function: test_related [L555]
 function: test_churn [L582]
-function: test_notebook [L603]
-function: test_notebook_debug [L660]
-function: test_errors [L713]
+function: test_notebook [L605]
+function: test_notebook_debug [L662]
+function: test_errors [L715]
 ```
 </file>
 </signatures>
@@ -816,30 +831,36 @@ function: test_errors [L713]
 
 <churn>
 ## Churn
-> 16 commits, 37 files touched. Commits = number of commits that modified the file. Lines = total lines added + deleted. History = per-file activity binned into 2 buckets of 10 commits each (oldest → newest), shaded by lines changed relative to the global max.
+> 18 commits, 39 files touched. Commits = number of commits that modified the file. Lines = total lines added + deleted. History = per-file activity binned into 18 buckets of 1 commits each (oldest → newest) [auto-sized], shaded by lines changed relative to the global max.
 
-| Commits | Lines | History | File                                                    |
-|---------|-------|---------|---------------------------------------------------------|
-|       8 |  2099 | `█░`    | `lib/render.py`                                         |
-|       9 |   939 | `░░`    | `lib/rqs_primer.sh`                                     |
-|       3 |   801 | `▒░`    | `lib/primer_insights.py`                                |
-|       9 |   777 | `▒░`    | `tests/run_tests.sh`                                    |
-|       8 |   520 | `░░`    | `README.md`                                             |
-|       3 |   272 | `░░`    | `lib/rqs_prompt.sh`                                     |
-|       3 |   237 | `░░`    | `lib/rqs_common.sh`                                     |
-|       2 |   232 | `░ `    | `lib/rqs_deps.sh`                                       |
-|       2 |   231 | `░ `    | `lib/rqs_related.sh`                                    |
-|       4 |   183 | `░ `    | `bin/rqs`                                               |
-|       3 |   113 | `░ `    | `lib/rqs_slice.sh`                                      |
-|       2 |   110 | `░ `    | `lib/rqs_symbols.sh`                                    |
-|       1 |   104 | `░ `    | `tests/fixtures/sample-repo/notebooks/analysis.ipynb`   |
-|       1 |    97 | `░ `    | `lib/rqs_outline.sh`                                    |
-|       3 |    88 | `░ `    | `lib/rqs_signatures.sh`                                 |
-|       1 |    82 | `░ `    | `lib/rqs_notebook.sh`                                   |
-|       1 |    78 | `░ `    | `tests/fixtures/sample-repo/notebooks/debug_test.ipynb` |
-|       1 |    67 | `░ `    | `lib/rqs_definition.sh`                                 |
-|       1 |    65 | `░ `    | `lib/rqs_context.sh`                                    |
-|       2 |    60 | `░░`    | `lib/rqs_files.sh`                                      |
+| Commits | Lines | History              | File                                                    |
+|---------|-------|----------------------|---------------------------------------------------------|
+|      10 |  2350 | `  ░░░ ░ █░  ░░  ░░` | `lib/render.py`                                         |
+|      10 |  1098 | `  ░░ ░ ░░░  ░ ░░░ ` | `lib/rqs_primer.sh`                                     |
+|       4 |   958 | `         ▒░ ░   ░ ` | `lib/primer_insights.py`                                |
+|       1 |   845 | `                ▒ ` | `context.md`                                            |
+|      10 |   833 | `  ░░░░  ░░   ░░░░ ` | `tests/run_tests.sh`                                    |
+|       8 |   520 | ` ░░░ ░  ░░    ░░  ` | `README.md`                                             |
+|       4 |   308 | `   ░    ░   ░   ░ ` | `lib/rqs_prompt.sh`                                     |
+|       3 |   237 | `  ░   ░    ░      ` | `lib/rqs_common.sh`                                     |
+|       2 |   232 | `  ░     ░         ` | `lib/rqs_deps.sh`                                       |
+|       2 |   231 | `        ░░        ` | `lib/rqs_related.sh`                                    |
+|       5 |   189 | `  ░░ ░  ░       ░ ` | `bin/rqs`                                               |
+|       3 |   113 | `  ░░ ░            ` | `lib/rqs_slice.sh`                                      |
+|       2 |   110 | `  ░   ░           ` | `lib/rqs_symbols.sh`                                    |
+|       1 |   104 | `        ░         ` | `tests/fixtures/sample-repo/notebooks/analysis.ipynb`   |
+|       1 |    97 | `  ░               ` | `lib/rqs_outline.sh`                                    |
+|       3 |    88 | `   ░░   ░         ` | `lib/rqs_signatures.sh`                                 |
+|       1 |    82 | `        ░         ` | `lib/rqs_notebook.sh`                                   |
+|       1 |    78 | `        ░         ` | `tests/fixtures/sample-repo/notebooks/debug_test.ipynb` |
+|       1 |    67 | `  ░               ` | `lib/rqs_definition.sh`                                 |
+|       1 |    65 | `        ░         ` | `lib/rqs_context.sh`                                    |
+
+### Author Activity
+> Same timeline buckets, showing which authors were active over time (by commit count).
+| Commits | Lines | Activity             | Author          |
+|---------|-------|----------------------|-----------------|
+|      18 |  9268 | `██████████████████` | `Dallan Prince` |
 </churn>
 
 </repository_primer>
